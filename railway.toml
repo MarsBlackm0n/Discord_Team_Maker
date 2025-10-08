@@ -1,0 +1,9 @@
+# Railway config-as-code
+$schema = "https://railway.com/railway.schema.json"
+
+[build]
+buildCommand = "pip install -U -r requirements.txt"
+
+[deploy]
+startCommand = "python main.py"
+restartPolicyType = "ALWAYS"
