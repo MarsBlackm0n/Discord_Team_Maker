@@ -1,68 +1,88 @@
 # 🚂 Déployer le bot sur Railway (gratuit)
 
-Ce dépôt est prêt pour un déploiement **Railway**. On utilise un **Volume** pour persister la base SQLite, et des **variables d’environnement** pour la config.
+Ce dépôt est prêt pour un déploiement **Railway**. On utilise un **Volume** pour persister la base SQLite, et des **variables d’environnement** pour la config. Ajouts récents : **tournoi**, **/help**, **backup/export CSV**, **réutilisation des salons Team i**.
 
 ---
 
 ## 1) Pré-requis côté repo
-- `main.py` à la racine (fourni).
-- `requirements.txt` avec: `discord.py`, `aiohttp`, `aiosqlite`, `python-dotenv` (et leurs versions si besoin).
+- `main.py` à la racine (point d’entrée).
+- `app/` avec cogs & modules : `cogs/` (`help.py`, `admin.py`, `ratings.py`, `team.py`, `tournament.py`), `db.py`, `riot.py`, `team_logic.py`, `voice.py`, `tournament_logic.py`, `config.py`.
+- `requirements.txt` : `discord.py`, `aiohttp`, `aiosqlite`, `python-dotenv`.
+- *(optionnel)* `runtime.txt` avec `python-3.11.9` (ou définissez la variable `PYTHON_VERSION` côté Railway).
 - **Ne commitez pas votre `.env`** (gardez-le localement).
 
 ---
 
 ## 2) Créer le projet Railway depuis GitHub
-1. Sur Railway → **New Project → Deploy from GitHub** → choisissez votre repo.
-2. Dans votre **service** (bloc du canvas), vérifiez le **Start Command** : `python main.py`.  
-   > Railway détecte en général Python automatiquement (Nixpacks). Corrigez si besoin.
+1. Railway → **New Project → Deploy from GitHub** → choisissez votre repo.
+2. Dans le **service** (worker Python), vérifiez **Start Command** : `python main.py`.  
+   > Railway/Nixpacks détecte Python automatiquement ; corrigez si besoin.
 
 ---
 
 ## 3) Variables d’environnement (Service → Variables)
-Ajoutez au minimum :
+À définir au minimum :
 - `DISCORD_BOT_TOKEN=...`
-- `RESTART_MODE=manager`  ← pour que `/restart` laisse Railway relancer l’app
-- `DB_PATH=/data/skills.db` ← pour écrire la DB dans le volume
-- `GUILD_ID=xxxxxxxxxxxx`  ← ID de **votre** serveur pour une sync slash **instantanée**
-- *(optionnel)* `OWNER_ID=xxxxxxxxxxxx` (votre user id Discord pour les commandes admin)
-- *(optionnel)* `RIOT_API_KEY=...` (sinon le bot bascule en mode “offline” pour les rangs LoL)
+- `DB_PATH=/data/skills.db` ← chemin de la base sur le volume
+- `RESTART_MODE=manager` ← pour que `/restart` laisse Railway relancer l’app
+- `GUILD_ID=xxxxxxxxxxxx` ← ID de votre serveur pour une **sync slash instantanée**
+- *(optionnel)* `OWNER_ID=xxxxxxxxxxxx` (pour les commandes admin)
+- *(optionnel)* `RIOT_API_KEY=...` (sinon le bot fonctionne en **offline** pour LoL)
+- *(recommandé)* `PYTHON_VERSION=3.11.9`
 
-> Astuce : utilisez `/whoami` sur le bot pour récupérer votre **User ID**.
+> Astuce : récupérez votre **User ID** avec `/whoami`.
 
 ---
 
 ## 4) Créer et monter un **Volume** (persistance DB)
 Sur la **Project Canvas** Railway :  
-- **⌘K / Ctrl+K** → tapez **“Volume”** → **Create Volume**.  
-- Attachez-le à **votre service** (le worker Python).  
+- **⌘K / Ctrl+K** → **“Volume”** → **Create Volume**.  
+- Attachez-le à votre **service**.  
 - **Mount path** : `/data`  
 - Sauvegardez.  
-Ensuite, assurez-vous d’avoir la variable `DB_PATH=/data/skills.db` dans les **Variables**.
+Ensuite, ajoutez/validez `DB_PATH=/data/skills.db` dans les **Variables**.
 
-> Sans volume, `skills.db` sera éphémère (perdu au rebuild).
+> Sans volume, `skills.db` est **éphémère** (perdu au rebuild / redeploy).
 
 ---
 
-## 5) Déployer et vérifier
+## 5) Intents & permissions
+- Portail Discord → **App → Bot → Privileged Gateway Intents** : activez **Server Members Intent**.  
+  *(Optionnel)* **Message Content Intent** pour supprimer le warning si vous utilisez `commands.Bot`.
+- Permissions serveur : *Use Application Commands*, *Manage Channels*, *Move Members* (et *Embed Links*).
+
+---
+
+## 6) Déployer & vérifier
 - Lancez un **Deploy/Redeploy**.
-- Ouvrez les **Logs** : vous devriez voir quelque chose comme :  
-  `✅ ... — slash prêts (synced guild: 123456...). DB: /data/skills.db`
+- Logs attendus :  
+  `✅ Connecté… — slash prêts. DB: /data/skills.db` et `✅ Loaded app.cogs.*`
 
-Si les commandes n’apparaissent pas tout de suite :  
+Si les commandes n’apparaissent pas :  
 - Vérifiez `GUILD_ID`.  
-- Exécutez la commande admin `/resync`.  
-- Vérifiez les **Permissions** côté serveur (voir SETUP).
+- Exécutez `/resync` (admin).  
+- Vérifiez les permissions du bot sur le serveur/salon.
 
 ---
 
-## 6) Cycle de vie
-- `/restart` : le bot s’arrête et Railway le relance (grâce à `RESTART_MODE=manager`).  
-- `/shutdown` : arrête le process (Railway relancera si la policy l’autorise).
-- Les **salons vocaux temporaires** créés par `/team ... create_voice:true` sont auto-supprimés après le TTL.
+## 7) Cycle de vie & stockage
+- `/restart` : coupe le process ; Railway le relance automatiquement (**manager**).
+- `/shutdown` : arrête le bot (peut être relancé selon la policy).
+- **Vocal Team i** : le bot **réutilise** les salons existants (noms stricts) et **supprime après TTL** uniquement ceux qu’il a créés.
+- **Sauvegarde/Export** :  
+  - `/backupdb` → envoie le fichier **.db**.  
+  - `/exportcsv` → envoie un **ZIP** de CSV (toutes les tables).  
+  Si la pièce jointe est trop grosse, passez par **Open Shell** (Service → Deployments → Shell) :
+  ```bash
+  ls -lah /data
+  nix-env -iA nixpkgs.sqlite  # installer sqlite (si besoin)
+  sqlite3 /data/skills.db ".tables"
+  sqlite3 /data/skills.db "SELECT * FROM skills LIMIT 5;"
+  ```
 
 ---
 
-## 7) Dépannage rapide
-- **Commandes slash absentes** : `GUILD_ID` manquant/incorrect, sync non faite, intégrations désactivées sur le serveur, ou pas de redeploy.
-- **Création/move vocal en erreur** : donnez au bot les permissions *Manage Channels* et *Move Members* sur votre serveur, et activez l’intent `voice_states` (déjà dans le code).
-- **BDD non persistée** : volume non monté sur `/data` **OU** `DB_PATH` non défini → corrigez et redeploy.
+## 8) Dépannage rapide
+- **Slash absents** : `GUILD_ID` incorrect/manquant, sync non faite, intégrations désactivées, ou redeploy manquant.
+- **BDD non persistée** : volume non monté sur `/data` **ou** `DB_PATH` non défini.
+- **Vocal non créé/déplacé** : permissions *Manage Channels* & *Move Members*.
