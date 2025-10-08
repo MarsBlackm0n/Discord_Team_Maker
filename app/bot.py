@@ -17,6 +17,7 @@ class TeamBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         # Charger les cogs
+        await self.load_extension("app.cogs.tournament")
         await self.load_extension("app.cogs.help")
         await self.load_extension("app.cogs.admin")
         await self.load_extension("app.cogs.ratings")
