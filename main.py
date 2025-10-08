@@ -1,5 +1,5 @@
 # main.py
-import os, sys, subprocess, re, math, random, asyncio
+import os, sys, subprocess, re, math, random, asyncio, time
 from pathlib import Path
 from typing import List, Dict, Tuple, Set, Optional
 from dotenv import load_dotenv
@@ -17,7 +17,7 @@ RESTART_MODE = os.getenv("RESTART_MODE", "manager")  # manager (Railway) ou self
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))           # mets l'ID de TON serveur dans les variables d'env
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_BOT_TOKEN manquant dans .env") 
+    raise RuntimeError("DISCORD_BOT_TOKEN manquant dans .env")
 
 intents = discord.Intents.default()
 intents.members = True
@@ -45,6 +45,15 @@ async def init_db():
             user_id TEXT PRIMARY KEY,
             summoner_name TEXT NOT NULL,
             region TEXT NOT NULL
+        )""")
+        # Rang LoL humain (offline/riot) pour affichage dans /ranks
+        await db.execute("""CREATE TABLE IF NOT EXISTS lol_rank (
+            user_id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,     -- 'offline' (setrank) ou 'riot'
+            tier TEXT NOT NULL,       -- ex. 'EMERALD'
+            division TEXT,            -- ex. 'III' (NULL si Master+)
+            lp INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL
         )""")
         await db.commit()
 
@@ -78,6 +87,20 @@ async def link_lol(user_id: int, summoner_name: str, region: str):
         )
         await db.commit()
 
+async def set_lol_rank(user_id: int, source: str, tier: str, division: Optional[str], lp: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO lol_rank (user_id, source, tier, division, lp, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                source=excluded.source,
+                tier=excluded.tier,
+                division=excluded.division,
+                lp=excluded.lp,
+                updated_at=excluded.updated_at
+        """, (str(user_id), source, (tier or "").upper(), (division or None), int(lp or 0), int(time.time())))
+        await db.commit()
+
 # ========= RIOT API & OFFLINE RANK =========
 PLATFORM_MAP = {
     "EUW": "euw1", "EUNE": "eun1", "NA": "na1", "KR": "kr",
@@ -100,6 +123,7 @@ def rank_to_rating(tier: str, division: Optional[str], lp: int) -> float:
     return base + bonus + lp_bonus
 
 async def fetch_lol_rating(session: aiohttp.ClientSession, region_code: str, summoner_name: str) -> Optional[float]:
+    # Gardé pour compat, mais on utilisera fetch_lol_rank_info dans les nouvelles parties
     if not RIOT_API_KEY:
         return None
     headers = {"X-Riot-Token": RIOT_API_KEY}
@@ -124,6 +148,38 @@ async def fetch_lol_rating(session: aiohttp.ClientSession, region_code: str, sum
     rank = chosen.get("rank")  # None pour Master+
     lp = int(chosen.get("leaguePoints", 0))
     return rank_to_rating(tier, rank, lp)
+
+async def fetch_lol_rank_info(session: aiohttp.ClientSession, region_code: str, summoner_name: str) -> Optional[Tuple[str, Optional[str], int, float]]:
+    """
+    Retourne (tier, division, lp, rating) ou None.
+    """
+    if not RIOT_API_KEY:
+        return None
+    headers = {"X-Riot-Token": RIOT_API_KEY}
+    base = f"https://{region_code}.api.riotgames.com"
+
+    async with session.get(f"{base}/lol/summoner/v4/summoners/by-name/{summoner_name}", headers=headers) as r:
+        if r.status != 200:
+            return None
+        summ = await r.json()
+    summ_id = summ.get("id")
+    if not summ_id:
+        return None
+
+    async with session.get(f"{base}/lol/league/v4/entries/by-summoner/{summ_id}", headers=headers) as r:
+        if r.status != 200:
+            return None
+        entries = await r.json()
+
+    chosen = next((e for e in entries if e.get("queueType") == "RANKED_SOLO_5x5"), entries[0] if entries else None)
+    if not chosen:
+        return None
+
+    tier = (chosen.get("tier") or "").upper()            # ex. EMERALD
+    division = chosen.get("rank")                         # ex. III (None si Master+)
+    lp = int(chosen.get("leaguePoints", 0))
+    rating = rank_to_rating(tier, division, lp)
+    return tier, division, lp, rating
 
 # ========= COLLECT & FALLBACK RATINGS =========
 async def ensure_ratings_for_members(members: List[discord.Member], auto_import_riot: bool = True) -> Tuple[Dict[int,float], List[discord.Member], List[discord.Member]]:
@@ -153,10 +209,12 @@ async def ensure_ratings_for_members(members: List[discord.Member], auto_import_
                 if not link:
                     continue
                 summoner, region_code = link
-                rr = await fetch_lol_rating(session, region_code, summoner)
-                if rr is not None:
+                info = await fetch_lol_rank_info(session, region_code, summoner)
+                if info is not None:
+                    tier, division, lp, rr = info
                     ratings[m.id] = rr
                     await set_rating(m.id, rr)
+                    await set_lol_rank(m.id, source="riot", tier=tier, division=division, lp=lp)
                     imported_from_riot.append(m)
 
     # 3) défaut 1000 pour les restants (sans écrire en DB)
@@ -372,6 +430,8 @@ DIV_CHOICES = [app_commands.Choice(name=d, value=d) for d in ["I","II","III","IV
 async def setrank_cmd(inter: discord.Interaction, user: discord.Member, tier: app_commands.Choice[str], division: Optional[app_commands.Choice[str]], lp: int = 0):
     r = rank_to_rating(tier.value, division.value if division else None, lp)
     await set_rating(user.id, r)
+    # on mémorise aussi le rang LoL "humain" pour /ranks
+    await set_lol_rank(user.id, source="offline", tier=tier.value, division=(division.value if division else None), lp=lp)
     div_txt = division.value if division else "-"
     await inter.response.send_message(
         f"✅ Rang défini pour **{user.display_name}** → {tier.name} {div_txt} {lp} LP → rating **{int(r)}**.",
@@ -390,17 +450,22 @@ SORT_CHOICES = [
     app_commands.Choice(name="Nom (A→Z)", value="name"),
 ]
 
-async def _fetch_all_ratings_and_links() -> Tuple[List[Tuple[int, float]], Set[int]]:
-    """Retourne (liste (user_id, rating), set(user_id liés LoL))."""
+async def _fetch_all_ratings_and_links() -> Tuple[List[Tuple[int, float]], Set[int], Dict[int, Tuple[str, Optional[str], int]]]:
+    """
+    Retourne:
+      - liste (user_id, rating)
+      - set(user_id liés LoL)
+      - dict user_id -> (tier, division, lp) si connu (offline/riot)
+    """
     rows: List[Tuple[int, float]] = []
     linked: Set[int] = set()
+    ranks: Dict[int, Tuple[str, Optional[str], int]] = {}
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT user_id, rating FROM skills") as cur:
             async for uid, rating in cur:
                 try:
                     rows.append((int(uid), float(rating)))
                 except Exception:
-                    # ignore lignes corrompues
                     pass
         async with db.execute("SELECT user_id FROM lol_links") as cur:
             async for (uid,) in cur:
@@ -408,7 +473,13 @@ async def _fetch_all_ratings_and_links() -> Tuple[List[Tuple[int, float]], Set[i
                     linked.add(int(uid))
                 except Exception:
                     pass
-    return rows, linked
+        async with db.execute("SELECT user_id, tier, division, lp FROM lol_rank") as cur:
+            async for uid, tier, division, lp in cur:
+                try:
+                    ranks[int(uid)] = (str(tier or ""), (division if division else None), int(lp or 0))
+                except Exception:
+                    pass
+    return rows, linked, ranks
 
 def _format_member_name(guild: discord.Guild, uid: int) -> Tuple[str, bool]:
     """Retourne (nom_affiché, present_dans_le_serveur)."""
@@ -417,7 +488,7 @@ def _format_member_name(guild: discord.Guild, uid: int) -> Tuple[str, bool]:
         return m.display_name, True
     return f"(id:{uid})", False
 
-@tree.command(name="ranks", description="Lister les ratings enregistrés en BDD (skills).")
+@tree.command(name="ranks", description="Lister les ratings enregistrés en BDD (skills) + rang LoL si dispo.")
 @app_commands.describe(
     scope="Portée : auto (vocal si possible), vocal, ou serveur",
     sort="Tri des résultats",
@@ -442,7 +513,7 @@ async def ranks_cmd(
         await inter.followup.send("❌ Cette commande ne peut être utilisée qu'en serveur.", ephemeral=True)
         return
 
-    all_rows, linked = await _fetch_all_ratings_and_links()
+    all_rows, linked, ranks_map = await _fetch_all_ratings_and_links()
     if not all_rows:
         await inter.followup.send("🗒️ Aucune donnée de rating n'est enregistrée pour le moment.", ephemeral=True)
         return
@@ -491,7 +562,15 @@ async def ranks_cmd(
         name, present = _format_member_name(guild, uid)
         link_mark = " 🔗" if uid in linked else ""
         out_server = " *(hors serveur)*" if not present else ""
-        lines.append(f"{i}. {name} — **{int(rating)}**{link_mark}{out_server}")
+
+        # Ajout du rang LoL si connu
+        rank_txt = ""
+        if uid in ranks_map:
+            tier, division, lp = ranks_map[uid]
+            pretty = f"{tier.title()}{(' ' + division) if division else ''} {lp} LP".strip()
+            rank_txt = f" · _{pretty}_"
+
+        lines.append(f"{i}. {name} — **{int(rating)}**{link_mark}{rank_txt}{out_server}")
 
     scope_label = "Salon vocal" if use_vocal else "Serveur"
     title = f"📒 Rangs enregistrés — {scope_label}"
@@ -516,18 +595,26 @@ async def linklol_cmd(inter: discord.Interaction, user: discord.Member, summoner
     if not code:
         await inter.followup.send("❌ Région invalide. Ex: EUW, EUNE, NA, KR, BR, JP, LAN, LAS, OCE, TR, RU")
         return
+
+    # Enregistre le lien quoi qu'il arrive
+    await link_lol(user.id, summoner, code)
+
     if not RIOT_API_KEY:
-        await link_lol(user.id, summoner, code)
         await inter.followup.send("ℹ️ Clé Riot absente → lien enregistré, mais import différé. Utilise `/setrank` ou `/setskill` en attendant.")
         return
+
     async with aiohttp.ClientSession() as session:
-        rating = await fetch_lol_rating(session, code, summoner)
-    await link_lol(user.id, summoner, code)
-    if rating is None:
+        info = await fetch_lol_rank_info(session, code, summoner)
+
+    if not info:
         await inter.followup.send("⚠️ Lien enregistré, mais impossible de récupérer le rang maintenant (clé manquante/expirée, pseudo, pas de ranked…). Utilise `/setrank` ou `/setskill`.")
-    else:
-        await set_rating(user.id, rating)
-        await inter.followup.send(f"✅ **{user.display_name}** lié à **{summoner}** ({region}) → rating **{int(rating)}**.")
+        return
+
+    tier, division, lp, rating = info
+    await set_rating(user.id, rating)
+    await set_lol_rank(user.id, source="riot", tier=tier, division=division, lp=lp)
+    div_txt = f" {division}" if division else ""
+    await inter.followup.send(f"✅ **{user.display_name}** lié à **{summoner}** ({region}) → rating **{int(rating)}** • _{tier.title()}{div_txt} {lp} LP_.")
 
 @tree.command(name="team", description="Créer des équipes (équilibrées ou aléatoires) avec options avancées & fallback rating.")
 @app_commands.describe(
