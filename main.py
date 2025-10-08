@@ -364,6 +364,136 @@ async def setrank_cmd(inter: discord.Interaction, user: discord.Member, tier: ap
         ephemeral=True
     )
 
+# ========= LISTE DES RANGS (BDD) =========
+SCOPE_CHOICES = [
+    app_commands.Choice(name="Auto (vocal si possible)", value="auto"),
+    app_commands.Choice(name="Salon vocal uniquement", value="voice"),
+    app_commands.Choice(name="Serveur entier", value="server"),
+]
+SORT_CHOICES = [
+    app_commands.Choice(name="Rating décroissant", value="rating_desc"),
+    app_commands.Choice(name="Rating croissant", value="rating_asc"),
+    app_commands.Choice(name="Nom (A→Z)", value="name"),
+]
+
+async def _fetch_all_ratings_and_links() -> Tuple[List[Tuple[int, float]], Set[int]]:
+    """Retourne (liste (user_id, rating), set(user_id liés LoL))."""
+    rows: List[Tuple[int, float]] = []
+    linked: Set[int] = set()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id, rating FROM skills") as cur:
+            async for uid, rating in cur:
+                try:
+                    rows.append((int(uid), float(rating)))
+                except Exception:
+                    # ignore lignes corrompues
+                    pass
+        async with db.execute("SELECT user_id FROM lol_links") as cur:
+            async for (uid,) in cur:
+                try:
+                    linked.add(int(uid))
+                except Exception:
+                    pass
+    return rows, linked
+
+def _format_member_name(guild: discord.Guild, uid: int) -> Tuple[str, bool]:
+    """Retourne (nom_affiché, present_dans_le_serveur)."""
+    m = guild.get_member(uid)
+    if m:
+        return m.display_name, True
+    return f"(id:{uid})", False
+
+@tree.command(name="ranks", description="Lister les ratings enregistrés en BDD (skills).")
+@app_commands.describe(
+    scope="Portée : auto (vocal si possible), vocal, ou serveur",
+    sort="Tri des résultats",
+    limit="Nombre max de lignes (5–100)"
+)
+@app_commands.choices(scope=SCOPE_CHOICES, sort=SORT_CHOICES)
+async def ranks_cmd(
+    inter: discord.Interaction,
+    scope: Optional[app_commands.Choice[str]] = None,
+    sort: Optional[app_commands.Choice[str]] = None,
+    limit: int = 25
+):
+    await inter.response.defer(ephemeral=True, thinking=True)
+
+    # paramètres
+    scope_val = (scope.value if scope else "auto").lower()
+    sort_val = (sort.value if sort else "rating_desc").lower()
+    limit = max(5, min(100, int(limit)))
+
+    guild = inter.guild
+    if not guild:
+        await inter.followup.send("❌ Cette commande ne peut être utilisée qu'en serveur.", ephemeral=True)
+        return
+
+    all_rows, linked = await _fetch_all_ratings_and_links()
+    if not all_rows:
+        await inter.followup.send("🗒️ Aucune donnée de rating n'est enregistrée pour le moment.", ephemeral=True)
+        return
+
+    # Détermine la portée (ensemble de user_ids autorisés)
+    allowed_ids: Optional[Set[int]] = None
+    use_vocal = False
+    author = inter.user if isinstance(inter.user, discord.Member) else guild.get_member(inter.user.id)
+    if scope_val == "voice" or (scope_val == "auto" and isinstance(author, discord.Member) and author.voice and author.voice.channel):
+        use_vocal = True
+        if isinstance(author, discord.Member) and author.voice and author.voice.channel:
+            allowed_ids = {m.id for m in author.voice.channel.members if not m.bot}
+        else:
+            # Pas en vocal → fallback serveur
+            allowed_ids = None
+
+    # Filtrage par portée
+    filtered = []
+    for uid, rating in all_rows:
+        if allowed_ids is not None and uid not in allowed_ids:
+            continue
+        filtered.append((uid, rating))
+
+    if not filtered:
+        if use_vocal:
+            await inter.followup.send("🔇 Aucun joueur du **salon vocal** n'a de rating enregistré.", ephemeral=True)
+        else:
+            await inter.followup.send("🗒️ Aucun rating correspondant à la portée sélectionnée.", ephemeral=True)
+        return
+
+    # Tri
+    if sort_val == "rating_asc":
+        filtered.sort(key=lambda x: x[1])
+    elif sort_val == "name":
+        filtered.sort(key=lambda x: _format_member_name(guild, x[0])[0].lower())
+    else:  # rating_desc
+        filtered.sort(key=lambda x: x[1], reverse=True)
+
+    # Limite
+    total = len(filtered)
+    filtered = filtered[:limit]
+
+    # Construction du rendu
+    lines = []
+    for i, (uid, rating) in enumerate(filtered, start=1):
+        name, present = _format_member_name(guild, uid)
+        link_mark = " 🔗" if uid in linked else ""
+        out_server = " *(hors serveur)*" if not present else ""
+        lines.append(f"{i}. {name} — **{int(rating)}**{link_mark}{out_server}")
+
+    scope_label = "Salon vocal" if use_vocal else "Serveur"
+    title = f"📒 Rangs enregistrés — {scope_label}"
+    desc = "\n".join(lines) if lines else "_(aucune entrée)_"
+
+    embed = discord.Embed(title=title, description=desc, color=discord.Color.green())
+    footer_bits = [f"{len(filtered)}/{total} affichés", f"Tri: {sort_val.replace('_', ' ')}"]
+    if use_vocal:
+        footer_bits.append("Portée: vocal")
+    else:
+        footer_bits.append("Portée: serveur")
+    embed.set_footer(text=" • ".join(footer_bits))
+
+    await inter.followup.send(embed=embed, ephemeral=True)
+
+
 @tree.command(name="linklol", description="Lier un compte LoL et initialiser le rating depuis le rang (Riot API).")
 @app_commands.describe(user="Membre", summoner="Pseudo LoL exact", region="Plateforme: EUW, EUNE, NA, KR, BR, JP, LAN, LAS, OCE, TR, RU")
 async def linklol_cmd(inter: discord.Interaction, user: discord.Member, summoner: str, region: str):
