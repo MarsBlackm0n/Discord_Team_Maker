@@ -17,7 +17,7 @@ RESTART_MODE = os.getenv("RESTART_MODE", "manager")  # manager (Railway) ou self
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))           # mets l'ID de TON serveur dans les variables d'env
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_BOT_TOKEN manquant dans .env")
+    raise RuntimeError("DISCORD_BOT_TOKEN manquant dans .env") 
 
 intents = discord.Intents.default()
 intents.members = True
