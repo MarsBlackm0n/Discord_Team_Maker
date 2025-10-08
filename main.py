@@ -22,7 +22,7 @@ intents.members = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-DB_PATH = Path(__file__).with_name("skills.db")
+DB_PATH = Path(os.getenv("DB_PATH", str(Path(__file__).with_name("skills.db"))))
 
 # ========= AUTH =========
 def is_authorized(inter: discord.Interaction) -> bool:
