@@ -19,6 +19,7 @@ if not TOKEN:
 
 intents = discord.Intents.default()
 intents.members = True
+intents.voice_states = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -331,11 +332,13 @@ async def create_and_move_voice(inter: discord.Interaction, teams: List[List[dis
     asyncio.create_task(cleanup())
 
 # ========= EVENTS =========
+
 @client.event
 async def on_ready():
     await init_db()
     await tree.sync()
-    print(f"✅ Connecté en tant que {client.user} — slash prêts.")
+    print(f"✅ Connecté en tant que {client.user} — slash prêts. DB: {DB_PATH}")
+
 
 # ========= COMMANDES =========
 @tree.command(name="setskill", description="Définir un rating manuel pour un joueur.")
@@ -509,12 +512,18 @@ async def restart_cmd(inter: discord.Interaction):
         await inter.response.send_message("⛔ Autorisation refusée.", ephemeral=True); return
     await inter.response.send_message("🔄 Redémarrage…", ephemeral=True)
     await asyncio.sleep(0.2)
-    try:
-        python = sys.executable
-        subprocess.Popen([python] + sys.argv, cwd=str(Path(__file__).parent))
-    finally:
+    if RESTART_MODE == "manager":
+        # ✅ Sur Railway: on se contente de quitter proprement
         await client.close()
-        os._exit(0)
+        os._exit(0)  # Railway relance le service (restart policy)
+    else:
+        # Mode local: relance auto du script
+        try:
+            python = sys.executable
+            subprocess.Popen([python] + sys.argv, cwd=str(Path(__file__).parent))
+        finally:
+            await client.close()
+            os._exit(0)
 
 # Optionnel: récupérer son User ID vite
 @tree.command(name="whoami", description="Affiche ton User ID.")
