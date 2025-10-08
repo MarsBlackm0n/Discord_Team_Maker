@@ -13,6 +13,8 @@ load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 RIOT_API_KEY = os.getenv("RIOT_API_KEY")  # peut être None -> fallback auto
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))  # 0 => désactivé
+RESTART_MODE = os.getenv("RESTART_MODE", "manager")  # manager (Railway) ou self
+GUILD_ID = int(os.getenv("GUILD_ID", "0"))           # mets l'ID de TON serveur dans les variables d'env
 
 if not TOKEN:
     raise RuntimeError("DISCORD_BOT_TOKEN manquant dans .env")
@@ -336,8 +338,20 @@ async def create_and_move_voice(inter: discord.Interaction, teams: List[List[dis
 @client.event
 async def on_ready():
     await init_db()
-    await tree.sync()
-    print(f"✅ Connecté en tant que {client.user} — slash prêts. DB: {DB_PATH}")
+
+    # (optionnel) log pour vérifier que /ranks est bien dans l'arbre local
+    print("📋 Commands déclarées :", [c.name for c in tree.get_commands()])
+
+    if GUILD_ID:
+        g = discord.Object(id=GUILD_ID)
+        # copie les commandes "globales" vers ce serveur puis sync ciblée
+        tree.copy_global_to(guild=g)
+        await tree.sync(guild=g)
+        print(f"✅ {client.user} — slash prêts (synced guild: {GUILD_ID}). DB: {DB_PATH}")
+    else:
+        # fallback global (peut mettre plusieurs minutes à apparaître côté client)
+        await tree.sync()
+        print(f"✅ {client.user} — slash prêts (synced global). DB: {DB_PATH}")
 
 
 # ========= COMMANDES =========
@@ -659,5 +673,21 @@ async def restart_cmd(inter: discord.Interaction):
 @tree.command(name="whoami", description="Affiche ton User ID.")
 async def whoami_cmd(inter: discord.Interaction):
     await inter.response.send_message(f"🪪 Ton User ID : `{inter.user.id}`", ephemeral=True)
+
+@tree.command(name="resync", description="Resynchroniser les commandes (owner/admin).")
+async def resync_cmd(inter: discord.Interaction):
+    if not is_authorized(inter):
+        await inter.response.send_message("⛔ Autorisation refusée.", ephemeral=True); return
+    await inter.response.defer(ephemeral=True, thinking=True)
+    if GUILD_ID:
+        g = discord.Object(id=GUILD_ID)
+        tree.copy_global_to(guild=g)
+        await tree.sync(guild=g)
+        await inter.followup.send("✅ Commands resynchronisées (guild).", ephemeral=True)
+    else:
+        await tree.sync()
+        await inter.followup.send("✅ Commands resynchronisées (global).", ephemeral=True)
+
+# ========= RUN =========
 
 client.run(TOKEN)
