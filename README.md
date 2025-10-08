@@ -1,134 +1,81 @@
-# 📗 Team Builder Bot — Guide Utilisateur (USER_GUIDE.md)
+# 📖 Guide utilisateur — Discord Team Builder Bot
 
-Le bot crée des **équipes équilibrées** (ou aléatoires) pour vos sessions de jeu.  
-Il peut aussi **créer des salons vocaux** et y déplacer automatiquement les joueurs.
-
----
-
-## 🚀 Démarrage rapide
-
-1) Rejoignez un **salon vocal** avec vos amis.  
-2) Tapez **/team** → le bot crée 2 équipes équilibrées.  
-![Exemple — Résultat /team](assets/discord_team_embed.png)
+Ce bot vous aide à **former des équipes équilibrées** (ou aléatoires), à **créer des salons vocaux** et à **gérer des niveaux** pour vos jeux (LoL, etc.).
 
 ---
 
-## 🧩 Définir votre niveau (3 façons)
+## 👥 Commandes principales
 
-### a) Sans Riot — définir votre **rang LoL** (offline)
-```
-/setrank user:@Moi tier:Gold division:II lp:60
-```
-![Formulaire — /setrank](assets/discord_setrank_modal.png)
+### `/team`
+Créer des équipes à partir des joueurs du **salon vocal** de l’auteur (ou d’une liste de mentions).  
+**Options :**
+- `mode` : `balanced` (par défaut) ou `random`
+- `team_count` : nombre d’équipes (2–6)
+- `sizes` : tailles fixes, ex. `3/3/2` (la somme doit = nb de joueurs)
+- `with_groups` : regrouper des joueurs, ex. `@A @B | @C @D`
+- `avoid_pairs` : séparer des paires, ex. `@A @B ; @C @D`
+- `members` : mentions si vous n’êtes pas en vocal
+- `create_voice` : `true` pour créer **Team 1..K** et y déplacer les joueurs
+- `channel_ttl` : durée de vie des salons (minutes, défaut 90)
+- `auto_import_riot` : `true/false` — si des joueurs ont lié LoL et que l’API est dispo
 
-### b) Rating **manuel**
-```
-/setskill user:@Moi rating:1250
-```
-![Formulaire — /setskill](assets/discord_setskill_modal.png)
+**Notes :**
+- Les **ratings** viennent d’abord de la BDD, puis (si activé) d’un import Riot, sinon **1000** par défaut.
+- Les contraintes sont respectées au mieux : le bot vous signale si certaines paires **n’ont pas pu être séparées**.
 
-### c) Lier votre **compte Riot** (si le bot a une clé Riot)
-```
-/linklol user:@Moi summoner:MonPseudoLoL region:EUW
-```
-![Formulaire — /linklol](assets/discord_linklol_modal.png)
-
-> Si la clé Riot est absente/expirée, le lien est enregistré mais l’import est différé.  
-> Tant que rien n’est défini, le bot vous considère **rating 1000**.
-
----
-
-## 🎛️ Créer des équipes — options
-
-### Équilibré vs Aléatoire
-```
-/team               # équilibré par défaut
-/team mode:random   # totalement aléatoire
-```
-
-### Nombre d’équipes
-```
-/team team_count:3
-```
-
-### Tailles **fixes** (la somme doit = nb de joueurs)
-```
-/team team_count:3 sizes:"3/3/2"
-```
-
-### **Contraintes**
-- Garder ensemble des joueurs :  
-  ```
-  /team with_groups:"@Alice @Bob | @Chloe @Dan"
-  ```
-- Séparer des paires :  
-  ```
-  /team avoid_pairs:"@Alice @Chloe ; @Evan @Fay"
-  ```
-![Exemple — with/avoid](assets/discord_constraints_example.png)
-
-### Utiliser des **mentions** au lieu du vocal
-```
-/team members:"@Alice @Bob @Chloe @Dan"
-```
-
-### Créer des **salons vocaux** + déplacer les joueurs
-```
-/team create_voice:true channel_ttl:45
-```
-→ crée *Team 1*, *Team 2*, … et supprime les salons **après 45 min**.  
-![Salons vocaux — Team 1, Team 2](assets/discord_voice_channels_created.png)
-
-Nettoyage manuel :
-```
-/disbandteams
-```
+**Exemples :**
+- `/team` (équilibré, 2 équipes à partir du vocal)
+- `/team mode:random team_count:3`
+- `/team sizes:"3/3/2" with_groups:"@A @B | @C @D" avoid_pairs:"@X @Y"`
+- `/team members:"@A @B @C @D @E @F" create_voice:true channel_ttl:60`
 
 ---
 
-## 📈 Comprendre l’embed de résultat
+### `/setskill`
+Définir un **rating manuel** pour un joueur.  
+Ex : `/setskill user:@Alice rating:1320`
 
-- Chaque équipe affiche : **joueurs + leur rating + total d’équipe**  
-- Le pied de carte indique la **différence globale** (Δ) entre la team la plus haute et la plus basse  
-- Message privé (éphémère) :  
-  - **Import Riot** réussi pour certains joueurs  
-  - Joueurs en **rating par défaut** (1000) → pensez à utiliser `/setrank` ou `/setskill`  
-![Exemple — Embed détaillé](assets/discord_team_embed_details.png)
+### `/setrank`
+Définir un **rang LoL offline** (sans API Riot) pour calculer un rating.  
+Paramètres : `tier` (Gold, Emerald…), `division` (I/II/III/IV, vide si Master+), `lp` (0–100).  
+Ex : `/setrank user:@Alice tier:Emerald division:III lp:9` → rating calculé.
 
----
+### `/linklol`
+Lier un compte LoL (et importer le rang si une **RIOT_API_KEY** est configurée côté serveur).  
+Ex : `/linklol user:@Alice summoner:"MonPseudo" region:EUW`  
+- Avec API : rating calculé automatiquement + rang mémorisé.  
+- Sans API : le lien est stocké, mais utilisez `/setrank` ou `/setskill`.
 
-## 🔐 Commandes réservées (owner/admin)
+### `/ranks`
+Lister les **ratings** en BDD, avec affichage du **rang LoL** s’il est connu (_Emerald III 9 LP_).  
+Options : `scope` (auto/voice/server), `sort` (rating_desc/rating_asc/name), `limit` (5–100).  
+Ex : `/ranks` (auto), `/ranks scope:voice sort:name limit:50`
 
-- **/shutdown** : arrête le bot  
-- **/restart** : redémarre le bot
-
-> Si un **OWNER_ID** est défini, seul ce user peut lancer ces commandes.  
-> Sinon, elles sont limitées aux **admins** (ou `Manage Server`).
-
----
-
-## ❓FAQ
-
-**Je ne vois pas /team**  
-→ Le bot vient d’être relancé : attendez quelques secondes que les commandes se synchronisent.
-
-**Je n’ai pas été déplacé dans mon salon**  
-→ Il faut être **déjà connecté** à un vocal pour que Discord autorise le déplacement.
-
-**Pourquoi je suis à 1000 ?**  
-→ Vous n’avez pas encore défini de niveau. Utilisez `/setrank`, `/setskill` ou `/linklol`.
-
-**Le bot n’a pas importé mon rang**  
-→ Clé Riot expirée, pseudo/région erronés ou pas de ranked récente. Utilisez `/setrank` ou `/setskill`.
+### `/disbandteams`
+Supprimer les **salons vocaux temporaires** créés par `/team`.
 
 ---
 
-## 📷 Captures à fournir (placez-les dans `assets/`)
+## 🔐 Commandes admin / owner
+- `/whoami` → affiche votre **User ID**.
+- `/resync` → resynchroniser les commandes (utile après déploiement).
+- `/restart` → redémarrer le bot (sur Railway, le process se coupe puis est relancé par la plateforme).
+- `/shutdown` → arrêter le bot.
 
-- `discord_team_embed.png` — Résultat basique de `/team`
-- `discord_setrank_modal.png` — Formulaire `/setrank`
-- `discord_setskill_modal.png` — Formulaire `/setskill`
-- `discord_linklol_modal.png` — Formulaire `/linklol`
-- `discord_constraints_example.png` — Exemple with_groups/avoid_pairs
-- `discord_voice_channels_created.png` — Salons *Team 1*, *Team 2*
-- `discord_team_embed_details.png` — Embed avec totaux et Δ
+> L’accès admin est accordé aux **Admins du serveur** ou à l’**OWNER_ID** configuré côté serveur.
+
+---
+
+## ℹ️ À propos des ratings & rangs LoL
+- Le bot stocke pour chaque joueur un **rating** numérique (ex. 1320) et, si dispo, un **rang LoL** (tier/division/LP) pour l’affichage.  
+- Le **rating** est calculé à partir du rang (barème simple) ou fixé manuellement via `/setskill`.  
+- Si un joueur n’a aucune info, le bot utilise **1000** par défaut (vous pouvez ensuite corriger).
+
+---
+
+## ❓Dépannage rapide
+- **La commande n’apparaît pas ?** Demandez à un admin de lancer `/resync`. Vérifiez que l’intégration du bot est autorisée dans le salon.
+- **Le bot ne crée pas les salons vocaux ?** Vérifiez qu’il a les permissions *Manage Channels* et *Move Members* sur le serveur/salon.
+- **Mon rang LoL n’apparaît pas dans `/ranks` ?** Liez votre compte via `/linklol` (si l’API est en place) **ou** utilisez `/setrank`.
+
+Bonne game ! 🎮
