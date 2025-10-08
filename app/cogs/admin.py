@@ -42,6 +42,17 @@ class AdminCog(commands.Cog):
             await self.bot.tree.sync()
             await inter.followup.send("✅ Commandes resynchronisées (global).", ephemeral=True)
 
+    @app_commands.command(name="resyncglobal", description="Publier/mettre à jour les commandes globales.")
+async def resyncglobal(self, inter: discord.Interaction):
+    if not self._is_authorized(inter):
+        await inter.response.send_message("⛔ Autorisation refusée.", ephemeral=True); return
+    await inter.response.defer(ephemeral=True, thinking=True)
+    try:
+        await self.bot.tree.sync()   # global
+        await inter.followup.send("✅ Commandes **globales** resynchronisées.", ephemeral=True)
+    except Exception as e:
+        await inter.followup.send(f"❌ Échec sync globale : {e}", ephemeral=True)
+
     # ------ cycle de vie ------
     @app_commands.command(name="shutdown", description="Arrêter le bot (owner/admin).")
     async def shutdown(self, inter: discord.Interaction):
