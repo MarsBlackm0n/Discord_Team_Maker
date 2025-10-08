@@ -11,6 +11,7 @@ class TeamBot(commands.Bot):
         intents = discord.Intents.default()
         intents.members = True
         intents.voice_states = True
+        intents.message_content = True  # <- pour supprimer le warning
         super().__init__(command_prefix="!", intents=intents)
         self.settings = settings
 
