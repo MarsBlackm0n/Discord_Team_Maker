@@ -1,9 +1,7 @@
-# Railway config-as-code
-$schema = "https://railway.com/railway.schema.json"
+# Railway config-as-code (minimal, valid TOML)
 
 [build]
 buildCommand = "pip install -U -r requirements.txt"
 
 [deploy]
 startCommand = "python main.py"
-restartPolicyType = "ALWAYS"
