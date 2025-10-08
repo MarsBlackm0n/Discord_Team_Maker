@@ -28,30 +28,63 @@ class AdminCog(commands.Cog):
     async def whoami(self, inter: discord.Interaction):
         await inter.response.send_message(f"🪪 Ton User ID : `{inter.user.id}`", ephemeral=True)
 
+    # petit helper d’affichage
+    def _fmt_cmds(self, cmds: list[app_commands.AppCommand]) -> str:
+        try:
+            names = [c.name for c in cmds]
+        except Exception:
+            names = []
+        return ", ".join(names) or "(aucune)"
+
     @app_commands.command(name="resync", description="Resynchroniser les commandes (owner/admin).")
     async def resync(self, inter: discord.Interaction):
         if not self._is_authorized(inter):
             await inter.response.send_message("⛔ Autorisation refusée.", ephemeral=True); return
         await inter.response.defer(ephemeral=True, thinking=True)
-        if self.bot.settings.GUILD_ID:
-            g = discord.Object(id=self.bot.settings.GUILD_ID)
-            self.bot.tree.copy_global_to(guild=g)
-            await self.bot.tree.sync(guild=g)
-            await inter.followup.send("✅ Commandes resynchronisées (guild).", ephemeral=True)
-        else:
-            await self.bot.tree.sync()
-            await inter.followup.send("✅ Commandes resynchronisées (global).", ephemeral=True)
 
-    @app_commands.command(name="resyncglobal", description="Publier/mettre à jour les commandes globales.")
+        msgs = []
+        # 1) Global sync (protégée)
+        try:
+            g = await self.bot.tree.sync()
+            msgs.append(f"🌐 Global: {len(g)} cmds ({self._fmt_cmds(g)})")
+        except Exception as e:
+            msgs.append(f"🌐 Global: échec ({e})")
+
+        # 2) Guild sync immédiate (si configurée)
+        if self.bot.settings.GUILD_ID:
+            try:
+                guild = discord.Object(id=self.bot.settings.GUILD_ID)
+                self.bot.tree.copy_global_to(guild=guild)
+                l = await self.bot.tree.sync(guild=guild)
+                msgs.append(f"🏠 Guild {self.bot.settings.GUILD_ID}: {len(l)} cmds ({self._fmt_cmds(l)})")
+            except Exception as e:
+                msgs.append(f"🏠 Guild {self.bot.settings.GUILD_ID}: échec ({e})")
+
+        await inter.followup.send("\n".join(msgs), ephemeral=True)
+
+    @app_commands.command(name="resyncglobal", description="Publier/mettre à jour les commandes globales (+ guild).")
     async def resyncglobal(self, inter: discord.Interaction):
         if not self._is_authorized(inter):
             await inter.response.send_message("⛔ Autorisation refusée.", ephemeral=True); return
         await inter.response.defer(ephemeral=True, thinking=True)
+
+        msgs = []
         try:
-            await self.bot.tree.sync()   # global
-            await inter.followup.send("✅ Commandes **globales** resynchronisées.", ephemeral=True)
+            g = await self.bot.tree.sync()
+            msgs.append(f"🌐 Global: {len(g)} cmds ({self._fmt_cmds(g)})")
         except Exception as e:
-            await inter.followup.send(f"❌ Échec sync globale : {e}", ephemeral=True)
+            msgs.append(f"🌐 Global: échec ({e})")
+
+        if self.bot.settings.GUILD_ID:
+            try:
+                guild = discord.Object(id=self.bot.settings.GUILD_ID)
+                self.bot.tree.copy_global_to(guild=guild)
+                l = await self.bot.tree.sync(guild=guild)
+                msgs.append(f"🏠 Guild {self.bot.settings.GUILD_ID}: {len(l)} cmds ({self._fmt_cmds(l)})")
+            except Exception as e:
+                msgs.append(f"🏠 Guild {self.bot.settings.GUILD_ID}: échec ({e})")
+
+        await inter.followup.send("\n".join(msgs), ephemeral=True)
 
     # ------ cycle de vie ------
     @app_commands.command(name="shutdown", description="Arrêter le bot (owner/admin).")
@@ -69,11 +102,9 @@ class AdminCog(commands.Cog):
         await inter.response.send_message("🔄 Redémarrage…", ephemeral=True)
         await asyncio.sleep(0.2)
         if self.bot.settings.RESTART_MODE == "manager":
-            # Sur Railway: on coupe le process, la plateforme relance
             await self.bot.close()
             os._exit(0)
         else:
-            # Mode local: relance du script puis sortie
             try:
                 python = sys.executable
                 subprocess.Popen([python] + sys.argv)
