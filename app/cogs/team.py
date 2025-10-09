@@ -285,7 +285,7 @@ class TeamCog(commands.Cog):
 
         embed = discord.Embed(title="🎲 Team Builder", color=discord.Color.blurple())
         for idx, team_list in enumerate(teams):
-            embed.add_field(name=f"Team {idx+1}", value=fmt_team(team_list, ratings, idx), inline=True)
+            embed.add_field(name="\u200b", value=fmt_team(team_list, ratings, idx), inline=True)
         totals = [int(sum(ratings[m.id] for m in t)) for t in teams]
         spread = (max(totals) - min(totals)) if totals else 0
         footer = f"Mode: {'Équilibré' if mode.lower()!='random' else 'Aléatoire'} • Δ total: {spread}"
