@@ -233,9 +233,9 @@ from ..db import get_team_last, create_tournament, add_participant, get_rating
 
     # ------- USE LAST TEAM SNAPSHOT -------
 
-    @app_commands.command(name="tournament_use_last", description="Créer/ajouter les joueurs du dernier /team ou /teamroll au tournoi courant.")
-    @app_commands.describe(name="Nom du tournoi (créé si aucun en cours)")
-    async def tournament_use_last(self, inter: discord.Interaction, name: str = "Tournoi"):
+@app_commands.command(name="tournament_use_last", description="Créer/ajouter les joueurs du dernier /team ou /teamroll au tournoi courant.")
+@app_commands.describe(name="Nom du tournoi (créé si aucun en cours)")
+async def tournament_use_last(self, inter: discord.Interaction, name: str = "Tournoi"):
         await inter.response.defer(thinking=True)
         snap = await get_team_last(self.bot.settings.DB_PATH, inter.guild.id)
         if not snap:
