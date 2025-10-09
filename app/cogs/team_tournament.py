@@ -67,13 +67,14 @@ async def tt_create(db_path: str, guild_id: int, name: str, created_by: int) -> 
 async def tt_get_active(db_path: str, guild_id: int):
     await ensure_tables(db_path)
     async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row  # <-- permet l’accès par nom de colonne
         cur = await db.execute(
             "SELECT * FROM team_tournaments WHERE guild_id=? AND state IN ('setup','running') ORDER BY id DESC LIMIT 1",
             (guild_id,)
         )
         row = await cur.fetchone()
         await cur.close()
-        return row
+        return dict(row) if row else None   # <-- renvoie un dict ou None
 
 async def tt_set_state(db_path: str, tournament_id: int, state: str):
     async with aiosqlite.connect(db_path) as db:
