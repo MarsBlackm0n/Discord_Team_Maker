@@ -548,20 +548,31 @@ async def add_team_signature(db_path: str, guild_id: int, session: str, players_
 
 
 async def clear_team_signatures(db_path: str, guild_id: int, session: str, players_fp: str = "", sizes_fp: str = "") -> int:
-    """Efface l'historique pour une session (et éventuellement un fingerprint précis). Renvoie le nb de lignes supprimées."""
+    """
+    Si 'session' est vide: on efface pour TOUTES les sessions mais UNIQUEMENT si players_fp & sizes_fp sont fournis.
+    """
     import aiosqlite
     async with aiosqlite.connect(db_path) as db:
         await _ensure_team_history_table(db)
-        if players_fp and sizes_fp:
+        if session and players_fp and sizes_fp:
             cur = await db.execute("""
                 DELETE FROM team_history
                 WHERE guild_id=? AND session=? AND players_fp=? AND sizes_fp=?;
             """, (guild_id, session, players_fp, sizes_fp))
-        else:
+        elif session:
             cur = await db.execute("""
                 DELETE FROM team_history
                 WHERE guild_id=? AND session=?;
             """, (guild_id, session))
+        else:
+            # session vide -> on exige players_fp & sizes_fp pour éviter un wipe global
+            if not (players_fp and sizes_fp):
+                return 0
+            cur = await db.execute("""
+                DELETE FROM team_history
+                WHERE guild_id=? AND players_fp=? AND sizes_fp=?;
+            """, (guild_id, players_fp, sizes_fp))
         n = cur.rowcount if cur.rowcount is not None else 0
         await db.commit()
         return n
+

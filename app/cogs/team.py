@@ -3,6 +3,7 @@ from typing import List, Dict, Tuple, Optional
 import itertools
 import time
 from datetime import datetime
+import random 
 
 import discord
 from discord import app_commands
@@ -131,7 +132,8 @@ class TeamCog(commands.Cog):
         guild = inter.guild
         if not guild:
             raise RuntimeError("Cette commande doit être utilisée dans un serveur.")
-
+        session = (session or "").strip() or f"auto-{datetime.utcnow().strftime('%Y%m%d')}"
+  
         # 1) Collecte joueurs
         if selected_members is not None:
             selected: List[discord.Member] = selected_members
@@ -197,13 +199,19 @@ class TeamCog(commands.Cog):
         # 4) Recherche de la meilleure combinaison (priorité aux inédites)
         BEST: Optional[tuple[int, int, List[List[discord.Member]]]] = None
         BEST_UNSEEN: Optional[List[List[discord.Member]]] = None
+        TOP_POOL: list[List[List[discord.Member]]] = []  # candidates ex æquo au meilleur score
         attempts = max(50, min(5000, int(attempts)))
+
         for _ in range(attempts):
+            # petite randomisation d'entrée pour casser la déterminisme
+            base = selected[:]
+            random.shuffle(base)
+
             if mode.lower() == "random":
-                cand = split_random(selected, team_count, sizes_list)
+                cand = split_random(base, team_count, sizes_list)
             else:
                 cand, _viol = balance_k_teams_with_constraints(
-                    selected, ratings, team_count, sizes_list, with_groups_list, avoid_pairs_set
+                    base, ratings, team_count, sizes_list, with_groups_list, avoid_pairs_set
                 )
 
             sig = self._composition_signature(cand)
@@ -213,9 +221,13 @@ class TeamCog(commands.Cog):
             rep, spr = penalty(cand)
             if (BEST is None) or (rep, spr) < (BEST[0], BEST[1]):
                 BEST = (rep, spr, cand)
+                TOP_POOL = [cand]          # on remet à zéro et on garde ce nouveau meilleur
+            elif BEST is not None and (rep, spr) == (BEST[0], BEST[1]):
+                # on accumule les ex æquo pour pouvoir piocher aléatoirement ensuite
+                TOP_POOL.append(cand)
 
             if BEST_UNSEEN is not None and rep == 0:
-                break  # inédite et parfaite côté paires
+                break  # jackpot: inédite et (rep==0)
 
         if BEST is None:
             raise RuntimeError("Impossible de générer des équipes.")
@@ -223,13 +235,15 @@ class TeamCog(commands.Cog):
         if BEST_UNSEEN is not None:
             teams = BEST_UNSEEN
             exhausted = False
-            # rep/spr pour affichage (recalcule léger)
             rep, spr = penalty(teams)
         else:
-            # toutes les signatures déjà vues pour ce set/tailles/session
-            _, _, teams = BEST
+            # EPUISE : toutes déjà vues -> on choisit au hasard dans le pool des meilleures
             exhausted = True
-            rep, spr = BEST[0], BEST[1]
+            # sécurité: si pool vide (improbable), on tombe sur BEST
+            pool = TOP_POOL or ([BEST[2]] if BEST else [])
+            teams = random.choice(pool)
+            rep, spr = penalty(teams)
+
 
         # 5) Affichage
         embed = discord.Embed(title=f"🎲 Team Roll — session: {session}", color=discord.Color.blurple())
@@ -246,7 +260,7 @@ class TeamCog(commands.Cog):
         seen, possible = await session_stats(self.bot.settings.DB_PATH, sid, [m.id for m in selected])
         footer = f"Répétitions évitées: {max(0, rep)} • Δ totals: {spr} • Couverture paires: {seen}/{possible}"
         if exhausted:
-            footer += " • ⚠️ Toutes les compositions possibles déjà vues pour cette session / ce set."
+            footer += " • ♻️ Espace épuisé: tirage varié (historique ignoré pour la nouveauté)"
         embed.set_footer(text=footer)
 
         # 6) Commit dans l’historique (optionnel)
@@ -262,7 +276,20 @@ class TeamCog(commands.Cog):
             await add_team_signature(
                 self.bot.settings.DB_PATH,
                 guild.id, session, players_fp, sizes_fp, sig, int(time.time())
+            )            sig = self._composition_signature(teams)
+            await add_team_signature(
+                self.bot.settings.DB_PATH,
+                guild.id, session, players_fp, sizes_fp, sig, int(time.time())
             )
+
+            # ✅ garde une fenêtre max d’historique (ex: 200 dernières compos)
+            KEEP_LAST = 200
+            try:
+                from ..db import prune_team_signatures
+                await prune_team_signatures(self.bot.settings.DB_PATH, guild.id, session, players_fp, sizes_fp, KEEP_LAST)
+            except Exception:
+                pass
+            
 
         return embed, teams, ratings
 
@@ -376,7 +403,7 @@ class TeamCog(commands.Cog):
 
         # Prépare les params pour un Reroll identique (mêmes joueurs/tailles)
         params = dict(
-            session="",                      # auto-YYYYMMDD dans teamroll
+            session=f"auto-{datetime.utcnow().strftime('%Y%m%d')}",                      # auto-YYYYMMDD dans teamroll
             team_count=team_count,
             sizes="",                        # on figera via sizes_list_override
             with_groups=with_groups,
@@ -669,9 +696,12 @@ class TeamCog(commands.Cog):
             await inter.response.send_message(f"ℹ️ Session `{session}` introuvable.", ephemeral=True)
 
     # -------- /teamroll_reset (signatures fortes) --------
-    @app_commands.command(name="teamroll_reset", description="Réinitialiser l'historique des compositions (signatures) pour une session.")
-    @app_commands.describe(session="Nom de la session", for_current_snapshot="Limiter le reset au set/tailles de la dernière config /team")
-    async def teamroll_reset(self, inter: discord.Interaction, session: str, for_current_snapshot: bool = False):
+    @app_commands.command(name="teamroll_reset", description="Réinitialiser l'historique des compositions (signatures).")
+    @app_commands.describe(
+        session="(Optionnel) Nom de la session. Si vide: purge pour TOUTES les sessions mais uniquement pour le set/tailles de la dernière config.",
+        for_current_snapshot="Limiter le reset au set/tailles de la dernière config /team (défaut: true)"
+    )
+    async def teamroll_reset(self, inter: discord.Interaction, session: str = "", for_current_snapshot: bool = True):
         if not inter.guild:
             await inter.response.send_message("❌ À utiliser sur un serveur.", ephemeral=True)
             return
@@ -681,6 +711,7 @@ class TeamCog(commands.Cog):
 
         players_fp = ""
         sizes_fp = ""
+
         if for_current_snapshot:
             snap = await get_team_last(self.bot.settings.DB_PATH, inter.guild.id)
             if not snap or not snap.get("teams"):
@@ -697,7 +728,9 @@ class TeamCog(commands.Cog):
             sizes_fp = self._sizes_fingerprint([len(team_ids) for team_ids in snap["teams"]])
 
         n = await clear_team_signatures(self.bot.settings.DB_PATH, inter.guild.id, session, players_fp, sizes_fp)
-        await inter.response.send_message(f"🧽 Historique des compositions réinitialisé ({n} entrées supprimées).", ephemeral=True)
+
+        scope = f"session `{session}`" if session else "toutes les sessions (pour ce set/tailles)"
+        await inter.response.send_message(f"🧽 Historique des compositions réinitialisé ({n} entrées supprimées) — {scope}.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
