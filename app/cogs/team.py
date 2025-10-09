@@ -701,6 +701,12 @@ class TeamCog(commands.Cog):
         session="(Optionnel) Nom de la session. Si vide: purge pour TOUTES les sessions mais uniquement pour le set/tailles de la dernière config.",
         for_current_snapshot="Limiter le reset au set/tailles de la dernière config /team (défaut: true)"
     )
+
+    @app_commands.command(name="teamroll_reset", description="Réinitialiser l'historique des compositions (signatures).")
+    @app_commands.describe(
+        session="(Optionnel) Nom de la session. Si vide: purge pour TOUTES les sessions mais uniquement pour le set/tailles de la dernière config.",
+        for_current_snapshot="Limiter le reset au set/tailles de la dernière config /team (défaut: true)"
+    )
     async def teamroll_reset(self, inter: discord.Interaction, session: str = "", for_current_snapshot: bool = True):
         if not inter.guild:
             await inter.response.send_message("❌ À utiliser sur un serveur.", ephemeral=True)
