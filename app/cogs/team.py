@@ -299,7 +299,6 @@ class TeamCog(commands.Cog):
                 return
             await interaction.edit_original_response(embed=embed, view=self)
 
-
     # -------- /team --------
     @app_commands.command(name="team", description="Créer des équipes (équilibrées ou aléatoires) avec options & fallback rating.")
     @app_commands.describe(
@@ -308,7 +307,7 @@ class TeamCog(commands.Cog):
         sizes='Tailles fixées, ex: "3/3/2" (somme = nb joueurs)',
         with_groups='Groupes ensemble, ex: "@A @B | @C @D"',
         avoid_pairs='Paires à séparer, ex: "@A @B ; @C @D"',
-        members="(Optionnel) liste de @mentions si pas de vocal",
+        members="(Optionnel) liste de @mentions si pas de vocal)",
         create_voice="Créer des salons vocaux Team 1..K et déplacer les joueurs",
         channel_ttl="Durée de vie des salons vocaux (minutes, défaut 90)",
         auto_import_riot="Importer via Riot pour les joueurs liés si possible (défaut: true)",
@@ -364,6 +363,7 @@ class TeamCog(commands.Cog):
                 selected, ratings, team_count, sizes_list, with_groups_list, avoid_pairs_set
             )
 
+        # Embed + bouton Reroll (en un seul envoi)
         embed = discord.Embed(title="🎲 Team Builder", color=discord.Color.blurple())
         for idx, team_list in enumerate(teams):
             embed.add_field(name="\u200b", value=fmt_team(team_list, ratings, idx), inline=True)
@@ -373,32 +373,27 @@ class TeamCog(commands.Cog):
         if violations:
             footer += f" • Contraintes violées: {len(violations)}"
         embed.set_footer(text=footer)
-        await inter.followup.send(embed=embed)
-        # ... calcule déjà 'teams', 'ratings', 'sizes_list', etc.
 
-        # 1) Envoi avec bouton Reroll
+        # Prépare les params pour un Reroll identique (mêmes joueurs/tailles)
         params = dict(
-            session="",                      # laisser vide => auto-YYYYMMDD dans teamroll
+            session="",                      # auto-YYYYMMDD dans teamroll
             team_count=team_count,
-            sizes="",                        # on laisse vide et on passe sizes_list_override pour figer les tailles
+            sizes="",                        # on figera via sizes_list_override
             with_groups=with_groups,
             avoid_pairs=avoid_pairs,
-            members="",                      # pas de mentions: notre _generate_roll fera fallback snapshot OU on fournit 'selected_members'
+            members="",                      # pas de mentions
             mode=mode,
             attempts=200,
             commit=True,
-            # bonus: on reroll exactement sur ce set (les mêmes joueurs) et mêmes tailles
-            selected_members=selected,               # <- la liste de Member collectée en début de /team
-            sizes_list_override=sizes_list,          # <- fige les tailles
+            selected_members=selected,       # mêmes joueurs
+            sizes_list_override=sizes_list,  # mêmes tailles
         )
-
         setattr(inter.client, "last_teamroll_params", params)
         view = self.RerollView(self, params=params, author_id=inter.user.id, timeout=300)
 
         await inter.followup.send(embed=embed, view=view)
 
-
-
+        # Notes annexes
         notes = []
         if imported_from_riot:
             notes.append("🏷️ Import Riot: " + ", ".join(m.display_name for m in imported_from_riot))
@@ -462,12 +457,13 @@ class TeamCog(commands.Cog):
         session="Nom de la session (ex: 'soirée-08-10'). Si vide: auto-YYYYMMDD",
         team_count="Nombre d'équipes (si vide, reprend celui du dernier /team)",
         sizes='Tailles fixées (ex: "3/3/2"). Si vide, reprend celles du dernier /team',
-        with_groups='Groupes ensemble (ex: "@A @B | @C @D")',
-        avoid_pairs='Paires à séparer (ex: "@A @B ; @C @D")',
+        with_groups='Groupes ensemble (ex: \"@A @B | @C @D\")',
+        avoid_pairs='Paires à séparer (ex: \"@A @B ; @C @D\")',
         members="(Optionnel) liste de @mentions; sinon vocal; sinon dernière config /team",
         mode="balanced (défaut) ou random",
         attempts="Nombre d’essais à explorer (défaut 200)",
-        commit="Sauvegarder le roll dans l’historique de session (défaut: true)"
+        commit="Sauvegarder le roll dans l’historique de session (défaut: true)",
+        use_last="Ignorer le vocal et reprendre le dernier /team (défaut: false)"
     )
     async def teamroll(
         self,
@@ -480,7 +476,8 @@ class TeamCog(commands.Cog):
         members: str = "",
         mode: str = "balanced",
         attempts: int = 200,
-        commit: bool = True
+        commit: bool = True,
+        use_last: bool = False
     ):
         await inter.response.defer(thinking=True)
 
@@ -493,15 +490,17 @@ class TeamCog(commands.Cog):
         if not session.strip():
             session = f"auto-{datetime.utcnow().strftime('%Y%m%d')}"
 
-        # Fallback snapshot si pas de mentions et pas en vocal
+        # Fallback snapshot si pas de mentions et pas en vocal (ou si use_last=True)
         selected_members: Optional[List[discord.Member]] = None
         sizes_list_override: Optional[List[int]] = None
 
         need_snapshot_fallback = False
         if not members.strip():
             author = guild.get_member(inter.user.id)
-            if not (author and author.voice and author.voice.channel):
+            if use_last:
                 need_snapshot_fallback = True
+            else:
+                need_snapshot_fallback = not (author and author.voice and author.voice.channel)
 
         if need_snapshot_fallback:
             snap = await get_team_last(self.bot.settings.DB_PATH, guild.id)
@@ -706,4 +705,3 @@ async def setup(bot: commands.Bot):
     await bot.add_cog(cog)
     # ✅ View persistante au démarrage (le custom_id doit correspondre au bouton)
     bot.add_view(TeamCog.RerollView(cog, timeout=None))
-
