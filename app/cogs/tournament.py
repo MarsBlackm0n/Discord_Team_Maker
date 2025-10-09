@@ -21,6 +21,39 @@ def is_admin_or_owner(bot: commands.Bot, inter: discord.Interaction) -> bool:
 
 class TournamentCog(commands.Cog):
 
+    # ------- USE LAST TEAM SNAPSHOT -------
+
+    @app_commands.command(name="tournament_use_last", description="Créer/ajouter les joueurs du dernier /team ou /teamroll au tournoi courant.")
+    @app_commands.describe(name="Nom du tournoi (créé si aucun en cours)")
+    async def tournament_use_last(self, inter: discord.Interaction, name: str = "Tournoi"):
+        await inter.response.defer(thinking=True)
+        snap = await get_team_last(self.bot.settings.DB_PATH, inter.guild.id)
+        if not snap:
+            await inter.followup.send("ℹ️ Aucune config de team enregistrée pour ce serveur.", ephemeral=True)
+            return
+
+        # Trouver ou créer le tournoi
+        from ..db import get_active_tournament
+        t = await get_active_tournament(self.bot.settings.DB_PATH, inter.guild.id)
+        if not t:
+            tid = await create_tournament(self.bot.settings.DB_PATH, inter.guild.id, name, inter.user.id)
+        else:
+            tid = int(t["id"])
+
+        # Ajouter tous les joueurs présents dans la dernière config (seed simple = ordre d’apparition)
+        seed = 1
+        uids = []
+        for team_ids in snap.get("teams", []):
+            for uid in team_ids:
+                if uid not in uids:
+                    uids.append(int(uid))
+
+        for uid in uids:
+            r = await get_rating(self.bot.settings.DB_PATH, uid)
+            await add_participant(self.bot.settings.DB_PATH, tid, uid, seed, float(r or 1000.0))
+            seed += 1
+
+        await inter.followup.send(f"✅ {len(uids)} joueurs ajoutés au tournoi **#{tid}** (source: dernière config).", ephemeral=True)
 
     """Gestion d'un tournoi Single Elimination."""
 
@@ -226,44 +259,6 @@ class TournamentCog(commands.Cog):
             emb.add_field(name=f"Round {rnd}", value="\n".join(lines), inline=False)
 
         await inter.channel.send(embed=emb)
-
-        # app/cogs/tournament.py (extrait à ajouter)
-from ..db import get_team_last, create_tournament, add_participant, get_rating
-
-
-    # ------- USE LAST TEAM SNAPSHOT -------
-
-@app_commands.command(name="tournament_use_last", description="Créer/ajouter les joueurs du dernier /team ou /teamroll au tournoi courant.")
-@app_commands.describe(name="Nom du tournoi (créé si aucun en cours)")
-async def tournament_use_last(self, inter: discord.Interaction, name: str = "Tournoi"):
-        await inter.response.defer(thinking=True)
-        snap = await get_team_last(self.bot.settings.DB_PATH, inter.guild.id)
-        if not snap:
-            await inter.followup.send("ℹ️ Aucune config de team enregistrée pour ce serveur.", ephemeral=True)
-            return
-
-        # Trouver ou créer le tournoi
-        from ..db import get_active_tournament
-        t = await get_active_tournament(self.bot.settings.DB_PATH, inter.guild.id)
-        if not t:
-            tid = await create_tournament(self.bot.settings.DB_PATH, inter.guild.id, name, inter.user.id)
-        else:
-            tid = int(t["id"])
-
-        # Ajouter tous les joueurs présents dans la dernière config (seed simple = ordre d’apparition)
-        seed = 1
-        uids = []
-        for team_ids in snap.get("teams", []):
-            for uid in team_ids:
-                if uid not in uids:
-                    uids.append(int(uid))
-
-        for uid in uids:
-            r = await get_rating(self.bot.settings.DB_PATH, uid)
-            await add_participant(self.bot.settings.DB_PATH, tid, uid, seed, float(r or 1000.0))
-            seed += 1
-
-        await inter.followup.send(f"✅ {len(uids)} joueurs ajoutés au tournoi **#{tid}** (source: dernière config).", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
