@@ -69,59 +69,71 @@ class HelpCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="help", description="Afficher l'aide des commandes du bot.")
-    @app_commands.describe(
-        command="(Optionnel) Nom d'une commande pour l'aide détaillée",
-        ephemeral="Répondre seulement à vous (par défaut: true)"
-    )
-    async def help_cmd(
-        self,
-        inter: discord.Interaction,
-        command: str | None = None,
-        ephemeral: bool = True
-    ):
-        if command:
-            # Recherche d'une commande par nom (case-insensitive)
-            name = command.strip().lstrip("/").lower()
-            for section, items in HELP_SECTIONS.items():
-                for it in items:
-                    if it["name"].lstrip("/").lower() == name:
-                        emb = discord.Embed(
-                            title=f"❓ Aide — {it['name']}",
-                            description=it["desc"],
-                            color=discord.Color.blurple()
-                        )
-                        if "examples" in it and it["examples"]:
-                            emb.add_field(
-                                name="Exemples",
-                                value="\n".join(f"`{ex}`" for ex in it["examples"]),
-                                inline=False
-                            )
-                        await inter.response.send_message(embed=emb, ephemeral=ephemeral)
-                        return
-            # Non trouvé : petite liste de suggestions
-            all_names = ", ".join(f"`{i['name']}`" for sec in HELP_SECTIONS.values() for i in sec)
-            await inter.response.send_message(
-                f"⚠️ Commande inconnue : `{command}`.\nEssaye l'une de : {all_names}",
-                ephemeral=True
+    @app_commands.command(name="help", description="Afficher l’aide du bot et les exemples de workflow.")
+    @app_commands.describe(command="(optionnel) nom d’une commande pour l’aide ciblée")
+    async def help(self, inter: discord.Interaction, command: str = None):
+        """Affiche l'aide générale ou celle d'une commande spécifique."""
+        embed = discord.Embed(color=discord.Color.blurple())
+
+        if not command:
+            embed.title = "📖 Guide rapide — Team Builder & Tournois"
+            embed.description = (
+                "Voici les principales commandes du bot, ainsi qu’un **exemple de flow typique** 👇\n\n"
+                "### 💡 Exemple de flow typique\n"
+                "1️⃣ `/team` — crée les équipes (équilibrées ou aléatoires)\n"
+                "2️⃣ (optionnel) `/teamroll` — mixe les équipes avec combinaisons inédites\n"
+                "3️⃣ `/go` — crée/réutilise les salons vocaux et déplace les joueurs\n"
+                "4️⃣ (optionnel) `/tournament create` → `/tournament add/start/view` — gère le bracket\n"
+                "5️⃣ `/disbandteams` — nettoie les salons après la session\n\n"
+                "💾 Les dernières équipes sont mémorisées (utilisées par `/go` et `/tournament`).\n"
             )
-            return
+            embed.add_field(
+                name="👥 Équipes",
+                value="`/team` `/teamroll` `/go` `/disbandteams`",
+                inline=False
+            )
+            embed.add_field(
+                name="🏆 Tournoi",
+                value="`/tournament create` `add` `start` `view` `report` `cancel`",
+                inline=False
+            )
+            embed.add_field(
+                name="📊 Ratings & LoL",
+                value="`/ranks` `/setskill` `/setrank` `/linklol`",
+                inline=False
+            )
+            embed.add_field(
+                name="🛠️ Admin",
+                value="`/whoami` `/resync` `/backupdb` `/exportcsv` `/shutdown`",
+                inline=False
+            )
+            embed.set_footer(text="Utilise `/help command:team` pour plus de détails sur une commande.")
+        else:
+            cmd = command.lower()
+            if cmd in {"team", "teamroll", "go"}:
+                embed.title = f"ℹ️ /{cmd}"
+                if cmd == "team":
+                    embed.description = (
+                        "**Crée des équipes équilibrées ou aléatoires.**\n"
+                        "Peut utiliser le vocal courant ou une liste de mentions.\n"
+                        "Optionnel : création automatique de salons 'Team 1..K'.\n\n"
+                        "Exemple : `/team mode:balanced team_count:3 create_voice:true`"
+                    )
+                elif cmd == "teamroll":
+                    embed.description = (
+                        "**Génère des combinaisons inédites** de joueurs (évite les paires déjà jouées).\n"
+                        "Chaque `/teamroll` peut être reroll via le bouton 🎲.\n\n"
+                        "Exemple : `/teamroll session:'soirée-08-10' team_count:4`"
+                    )
+                elif cmd == "go":
+                    embed.description = (
+                        "**Crée ou réutilise les salons vocaux 'Team 1..K' et déplace les joueurs.**\n"
+                        "S’appuie sur la dernière configuration d’équipe générée (`/team` ou `/teamroll`)."
+                    )
+            else:
+                embed.description = f"Aucune aide détaillée pour `{cmd}`."
 
-        # Aide globale
-        emb = discord.Embed(
-            title="📚 Aide — Team Builder Bot",
-            description=(
-                "Formez des équipes équilibrées, créez des salons vocaux et gérez les ratings/rangs LoL.\n"
-                "• Pour l’aide d’une commande précise : `/help command:team` (par ex.)"
-            ),
-            color=discord.Color.blurple()
-        )
-        for section, items in HELP_SECTIONS.items():
-            lines = [f"• **{it['name']}** — {it['desc']}" for it in items]
-            emb.add_field(name=section, value="\n".join(lines), inline=False)
-
-        emb.set_footer(text="Astuce: utilisez /resync si les commandes n'apparaissent pas après un déploiement.")
-        await inter.response.send_message(embed=emb, ephemeral=ephemeral)
+        await inter.response.send_message(embed=embed, ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(HelpCog(bot))

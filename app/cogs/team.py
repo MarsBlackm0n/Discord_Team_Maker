@@ -1,7 +1,8 @@
 # app/cogs/team.py
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import itertools
-import time 
+import time
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -54,7 +55,6 @@ class TeamCog(commands.Cog):
                 if not link:
                     continue
                 summoner, region_code = link
-                # fetch_lol_rank_info doit retourner (tier, division, lp, rating_float)
                 info = await fetch_lol_rank_info(
                     self.bot.settings.RIOT_API_KEY,
                     region_code,
@@ -139,7 +139,7 @@ class TeamCog(commands.Cog):
             return rep, spread
 
         # 4) Recherche de la meilleure combinaison
-        BEST = None  # (pen_rep, spread, teams)
+        BEST: Optional[tuple[int, int, List[List[discord.Member]]]] = None
         attempts = max(20, min(2000, int(attempts)))
         for _ in range(attempts):
             if mode.lower() == "random":
@@ -195,7 +195,10 @@ class TeamCog(commands.Cog):
             self.author_id = author_id
 
         async def interaction_check(self, interaction: discord.Interaction) -> bool:
-            # Auteur initial OU admin/manager
+            # Auteur initial OU admin/manager; si author_id inconnu (reboot), on autorise admin/manager
+            if self.author_id is None:
+                m = interaction.guild and interaction.guild.get_member(interaction.user.id)
+                return bool(m and (m.guild_permissions.administrator or m.guild_permissions.manage_guild))
             if interaction.user.id == self.author_id:
                 return True
             m = interaction.guild and interaction.guild.get_member(interaction.user.id)
@@ -224,7 +227,7 @@ class TeamCog(commands.Cog):
         sizes='Tailles fixées, ex: "3/3/2" (somme = nb joueurs)',
         with_groups='Groupes ensemble, ex: "@A @B | @C @D"',
         avoid_pairs='Paires à séparer, ex: "@A @B ; @C @D"',
-        members="(Optionnel) liste de @mentions si pas de vocal)",
+        members="(Optionnel) liste de @mentions si pas de vocal",
         create_voice="Créer des salons vocaux Team 1..K et déplacer les joueurs",
         channel_ttl="Durée de vie des salons vocaux (minutes, défaut 90)",
         auto_import_riot="Importer via Riot pour les joueurs liés si possible (défaut: true)",
@@ -309,14 +312,14 @@ class TeamCog(commands.Cog):
             except discord.Forbidden:
                 await inter.followup.send("⚠️ Permissions manquantes (Manage Channels / Move Members).")
 
-            # Sauvegarde "dernière config" (serveur)
+        # Sauvegarde "dernière config" (serveur) — toujours, indépendamment de create_voice
         try:
             snapshot = {
                 "mode": mode.lower(),
                 "team_count": team_count,
                 "sizes": sizes_list,
                 "teams": [[m.id for m in t] for t in teams],
-                "ratings": {str(uid): float(r) for uid, r in ((m.id, ratings[m.id]) for m in sum(teams, []))},
+                "ratings": {str(uid): float(ratings[uid]) for uid in [m.id for t in teams for m in t]},
                 "params": {
                     "with_groups": with_groups, "avoid_pairs": avoid_pairs, "members": members,
                     "session": "", "attempts": 0
@@ -392,14 +395,104 @@ class TeamCog(commands.Cog):
             await inter.followup.send(f"❌ {e}")
             return
 
-        # Bouton Reroll avec les mêmes paramètres
+        # Sauvegarde "dernière config" (serveur)
+        try:
+            sizes_list = parse_sizes(sizes, sum(len(t) for t in teams), team_count)
+            snapshot = {
+                "mode": mode.lower(),
+                "team_count": team_count,
+                "sizes": sizes_list,
+                "teams": [[m.id for m in t] for t in teams],
+                "ratings": {str(uid): float(ratings[uid]) for uid in [m.id for t in teams for m in t]},
+                "params": {
+                    "with_groups": with_groups, "avoid_pairs": avoid_pairs, "members": members,
+                    "session": session, "attempts": attempts
+                },
+                "created_by": inter.user.id,
+                "created_at": int(time.time()),
+            }
+            await set_team_last(self.bot.settings.DB_PATH, inter.guild.id, snapshot)
+        except Exception:
+            pass
+
+        # Bouton Reroll avec les mêmes paramètres (+ stock global simple)
         params = dict(
             session=session, team_count=team_count, sizes=sizes,
             with_groups=with_groups, avoid_pairs=avoid_pairs,
             members=members, mode=mode, attempts=attempts, commit=commit
         )
+        # Fallback global (non parfait) si la view perd ses params :
+        setattr(inter.client, "last_teamroll_params", params)
+
         view = self.RerollView(self, params=params, author_id=inter.user.id, timeout=300)
         await inter.followup.send(embed=embed, view=view)
+
+    # -------- /team_last --------
+    @app_commands.command(name="team_last", description="Afficher la dernière configuration d'équipes enregistrée pour ce serveur.")
+    async def team_last(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        snap = await get_team_last(self.bot.settings.DB_PATH, inter.guild.id)
+        if not snap:
+            await inter.followup.send("ℹ️ Aucune configuration de team enregistrée pour ce serveur.", ephemeral=True)
+            return
+
+        ids_to_members = {m.id: m for m in inter.guild.members}
+        embed = discord.Embed(title="🗂️ Dernière config d'équipes", color=discord.Color.green())
+        for idx, team_ids in enumerate(snap.get("teams", []), start=1):
+            names = []
+            for uid in team_ids:
+                member = ids_to_members.get(int(uid))
+                if member:
+                    rating = int(float(snap.get("ratings", {}).get(str(uid), 0)))
+                    names.append(f"- {member.display_name} ({rating})")
+                else:
+                    names.append(f"- (id:{uid})")
+            total = sum(int(float(snap.get("ratings", {}).get(str(uid), 0))) for uid in team_ids)
+            embed.add_field(name=f"Team {idx} — total {total}", value="\n".join(names) or "_(vide)_", inline=True)
+
+        meta = snap.get("params", {})
+        footer = f"Mode: {snap.get('mode','?')} • Équipes: {snap.get('team_count','?')}"
+        if meta.get("session"):
+            footer += f" • Session: {meta['session']}"
+        embed.set_footer(text=footer)
+        await inter.followup.send(embed=embed, ephemeral=True)
+
+    # -------- /go --------
+    @app_commands.command(name="go", description="Créer les salons vocaux et déplacer les joueurs selon la dernière config.")
+    @app_commands.describe(
+        channel_ttl="Durée de vie des salons (minutes, défaut 90)",
+        reuse_existing="Réutiliser des salons 'Team 1', 'Team 2' existants si présents (si ton voice.py le gère)"
+    )
+    async def go(self, inter: discord.Interaction, channel_ttl: int = 90, reuse_existing: bool = True):
+        await inter.response.defer(thinking=True)
+        snap = await get_team_last(self.bot.settings.DB_PATH, inter.guild.id)
+        if not snap:
+            await inter.followup.send("ℹ️ Aucune config enregistrée. Lance d'abord /team ou /teamroll.", ephemeral=True)
+            return
+
+        # Recompose les objets Member à partir des IDs
+        guild = inter.guild
+        teams: List[List[discord.Member]] = []
+        for team_ids in snap.get("teams", []):
+            members_obj = []
+            for uid in team_ids:
+                m = guild.get_member(int(uid))
+                if m and not m.bot:
+                    members_obj.append(m)
+            teams.append(members_obj)
+
+        sizes = snap.get("sizes") or [len(t) for t in teams]
+        try:
+            # create_and_move_voice doit gérer la réutilisation si tu as patché voice.py
+            await create_and_move_voice(
+                inter,
+                teams,
+                sizes,
+                ttl_minutes=max(int(channel_ttl), 1),
+            )
+            await inter.followup.send("🚀 Salons créés/réutilisés et joueurs déplacés.", ephemeral=True)
+        except discord.Forbidden:
+            await inter.followup.send("⚠️ Permissions manquantes (Manage Channels / Move Members).", ephemeral=True)
 
     # -------- /teamroll_end --------
     @app_commands.command(name="teamroll_end", description="Terminer/effacer une session de roll (réinitialise l’historique).")
@@ -422,6 +515,5 @@ async def setup(bot: commands.Bot):
     cog = TeamCog(bot)
     await bot.add_cog(cog)
 
-    # ✅ Ajouter la view persistante au démarrage
-    # (le custom_id doit correspondre à celui du bouton)
+    # ✅ Ajouter la view persistante au démarrage (le custom_id doit correspondre au bouton)
     bot.add_view(TeamCog.RerollView(cog, timeout=None))
