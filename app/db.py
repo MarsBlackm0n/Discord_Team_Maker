@@ -479,12 +479,20 @@ async def get_team_last(db_path: Path, guild_id: int) -> Optional[dict]:
                 return None
 
 async def set_next_links(db_path, tournament_id, updates):
-    # updates: list[(match_id, next_match_id, next_slot)]
+    """
+    updates: list[(match_id, next_match_id, next_slot)]
+    Met à jour next_match_id / next_slot sans recréer les matchs.
+    """
     import aiosqlite
     async with aiosqlite.connect(db_path) as db:
-        await db.executemany(
-            "UPDATE matches SET next_match_id=?, next_slot=? WHERE id=? AND tournament_id=?",
-            ((nmid, slot, mid, tournament_id) for (mid, nmid, slot) in updates)
+        # Détecte le bon nom de table utilisé par le schéma existant
+        cur = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('matches','tournament_matches')"
         )
-        await db.commit()
+        row = await cur.fetchone()
+        await cur.close()
+        table = row[0] if row else "matches"  # fallback
 
+        sql = f"UPDATE {table} SET next_match_id=?, next_slot=? WHERE id=? AND tournament_id=?"
+        await db.executemany(sql, ((nmid, slot, mid, tournament_id) for (mid, nmid, slot) in updates))
+        await db.commit()
