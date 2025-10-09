@@ -8,7 +8,7 @@ from discord.ext import commands
 from ..db import (
     get_rating, create_tournament, get_active_tournament, set_tournament_state,
     add_participant, list_participants, clear_bracket, create_matches, list_matches,
-    report_match_result, get_team_last
+    report_match_result, get_team_last, set_next_links  # <-- ajout ici
 )
 from ..tournament_logic import build_bracket_matches, resolve_next_ids
 from ..team_logic import parse_mentions
@@ -99,9 +99,7 @@ class TournamentCog(commands.Cog):
         for uid in ordered:
             if uid in existing_ids:
                 planned_rows.append((seed, uid, ratings_cache.get(uid, 1000.0), True))
-                # seed non incrémenté car on ne crée pas une nouvelle entrée
                 continue
-
             planned_rows.append((seed, uid, ratings_cache.get(uid, 1000.0), False))
             if not dry_run and tournament_id is not None:
                 await add_participant(self.bot.settings.DB_PATH, tournament_id, uid, seed, float(ratings_cache[uid]))
@@ -226,6 +224,7 @@ class TournamentCog(commands.Cog):
         user_ids_by_seed = [int(p["user_id"]) for p in part]  # déjà triés par seed ASC
         raw_matches = build_bracket_matches(user_ids_by_seed, best_of=best_of)
 
+        # 1) insertion "vierge" (next_match_id=None)
         await clear_bracket(self.bot.settings.DB_PATH, t["id"])
         for m in raw_matches:
             m["next_match_id"] = None
@@ -243,24 +242,25 @@ class TournamentCog(commands.Cog):
             } for m in raw_matches
         ])
 
+        # 2) lire les lignes créées et les ordonner comme raw_matches
         created = await list_matches(self.bot.settings.DB_PATH, t["id"])
-        created.sort(key=lambda r: (r["round"], r["pos_in_round"]))  # <— ordre déterministe
+        created.sort(key=lambda r: (r["round"], r["pos_in_round"]))
         sql_ids = [row["id"] for row in created]
+
+        # 3) calculer les bons next_match_id
         resolved = resolve_next_ids(sql_ids, raw_matches)
 
-        await clear_bracket(self.bot.settings.DB_PATH, t["id"])
-        await create_matches(self.bot.settings.DB_PATH, t["id"], [
-            {
-                "round": m["round"],
-                "pos_in_round": m["pos_in_round"],
-                "p1_user_id": m["p1_user_id"],
-                "p2_user_id": m["p2_user_id"],
-                "best_of": m["best_of"],
-                "status": m["status"],
-                "next_match_id": m["next_match_id"],
-                "next_slot": m["next_slot"]
-            } for m in resolved
-        ])
+        # 4) mettre à jour en place (et non pas ré-effacer/ré-créer)
+        id_by_key = {(r["round"], r["pos_in_round"]): r["id"] for r in created}
+        updates = []
+        for m in resolved:
+            if m["next_match_id"] is None:
+                continue
+            mid = id_by_key[(m["round"], m["pos_in_round"])]
+            updates.append((mid, m["next_match_id"], m["next_slot"]))
+
+        if updates:
+            await set_next_links(self.bot.settings.DB_PATH, t["id"], updates)
 
         await set_tournament_state(self.bot.settings.DB_PATH, t["id"], "running", started=True)
 

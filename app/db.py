@@ -455,8 +455,6 @@ async def session_stats(db_path: Path, session_id: int, user_ids: Iterable[int])
             seen += 1
     return seen, len(all_pairs)
 
-import json, time
-
 async def set_team_last(db_path: Path, guild_id: int, snapshot: dict) -> None:
     payload = json.dumps(snapshot, ensure_ascii=False)
     async with aiosqlite.connect(db_path) as db:
@@ -479,4 +477,14 @@ async def get_team_last(db_path: Path, guild_id: int) -> Optional[dict]:
                 return json.loads(row[0])
             except Exception:
                 return None
+
+async def set_next_links(db_path, tournament_id, updates):
+    # updates: list[(match_id, next_match_id, next_slot)]
+    import aiosqlite
+    async with aiosqlite.connect(db_path) as db:
+        await db.executemany(
+            "UPDATE matches SET next_match_id=?, next_slot=? WHERE id=? AND tournament_id=?",
+            ((nmid, slot, mid, tournament_id) for (mid, nmid, slot) in updates)
+        )
+        await db.commit()
 
