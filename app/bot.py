@@ -37,6 +37,7 @@ class TeamBot(commands.Bot):
             "app.cogs.admin",
             "app.cogs.ratings",
             "app.cogs.team",
+            "app.cogs.teamm_tournament"
         ):
             await _safe_load(ext)
 
