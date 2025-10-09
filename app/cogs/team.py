@@ -388,7 +388,7 @@ class TeamCog(commands.Cog):
             )
 
         # Embed + bouton Reroll (en un seul envoi)
-        embed = discord.Embed(title="🎲 Team Builder", color=discord.Color.blurple())
+        embed = discord.Embed(title=f"🎲 Team Builder — session: {session}", color=discord.Color.blurple())
         for idx, team_list in enumerate(teams):
             embed.add_field(name="\u200b", value=fmt_team(team_list, ratings, idx), inline=True)
         totals = [int(sum(ratings[m.id] for m in t)) for t in teams]
@@ -695,16 +695,14 @@ class TeamCog(commands.Cog):
     # -------- /teamroll_reset (signatures fortes) --------
     @app_commands.command(name="teamroll_reset", description="Réinitialiser l'historique des compositions (signatures).")
     @app_commands.describe(
-        session="(Optionnel) Nom de la session. Si vide: purge pour TOUTES les sessions mais uniquement pour le set/tailles de la dernière config.",
-        for_current_snapshot="Limiter le reset au set/tailles de la dernière config /team (défaut: true)"
+        session="(Optionnel) Nom de la session. Si vide: purge pour TOUTES les sessions mais UNIQUEMENT pour le set/tailles de la dernière config.",
+        for_current_snapshot="Limiter au set/tailles de la dernière config (défaut: true)"
     )
     async def teamroll_reset(self, inter: discord.Interaction, session: str = "", for_current_snapshot: bool = True):
         if not inter.guild:
-            await inter.response.send_message("❌ À utiliser sur un serveur.", ephemeral=True)
-            return
+            await inter.response.send_message("❌ À utiliser sur un serveur.", ephemeral=True); return
         if not inter.user.guild_permissions.administrator:
-            await inter.response.send_message("⛔ Réservé aux admins.", ephemeral=True)
-            return
+            await inter.response.send_message("⛔ Réservé aux admins.", ephemeral=True); return
 
         players_fp = ""
         sizes_fp = ""
@@ -712,10 +710,9 @@ class TeamCog(commands.Cog):
         if for_current_snapshot:
             snap = await get_team_last(self.bot.settings.DB_PATH, inter.guild.id)
             if not snap or not snap.get("teams"):
-                await inter.response.send_message("ℹ️ Pas de snapshot /team pour cibler un set précis.", ephemeral=True)
-                return
+                await inter.response.send_message("ℹ️ Pas de snapshot /team pour cibler un set précis.", ephemeral=True); return
             lookup = {m.id: m for m in inter.guild.members}
-            selected: List[discord.Member] = []
+            selected = []
             for team_ids in snap["teams"]:
                 for uid in team_ids:
                     m = lookup.get(int(uid))
@@ -724,7 +721,10 @@ class TeamCog(commands.Cog):
             players_fp = self._players_fingerprint(selected)
             sizes_fp = self._sizes_fingerprint([len(team_ids) for team_ids in snap["teams"]])
 
+        # utilise clear_team_signatures adapté dans db.py
+        from ..db import clear_team_signatures
         n = await clear_team_signatures(self.bot.settings.DB_PATH, inter.guild.id, session, players_fp, sizes_fp)
+
         scope = f"session `{session}`" if session else "toutes les sessions (pour ce set/tailles)"
         await inter.response.send_message(f"🧽 Historique des compositions réinitialisé ({n} entrées supprimées) — {scope}.", ephemeral=True)
 
