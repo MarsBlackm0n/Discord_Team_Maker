@@ -286,9 +286,8 @@ class TeamCog(commands.Cog):
             return bool(m and (m.guild_permissions.administrator or m.guild_permissions.manage_guild))
 
         @discord.ui.button(label="Reroll", emoji="🎲", style=discord.ButtonStyle.primary, custom_id="team_reroll_button")
-        async def do_reroll(self, button: discord.ui.Button, interaction: discord.Interaction):
+        async def do_reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
             await interaction.response.defer(thinking=True)
-            # Récupérer les paramètres de la view si disponibles
             params = self.params or getattr(interaction.client, "last_teamroll_params", None)
             if not params:
                 await interaction.followup.send("⚠️ Impossible de retrouver les paramètres du dernier roll.", ephemeral=True)
@@ -299,6 +298,7 @@ class TeamCog(commands.Cog):
                 await interaction.followup.send(f"❌ {e}", ephemeral=True)
                 return
             await interaction.edit_original_response(embed=embed, view=self)
+
 
     # -------- /team --------
     @app_commands.command(name="team", description="Créer des équipes (équilibrées ou aléatoires) avec options & fallback rating.")
@@ -374,6 +374,30 @@ class TeamCog(commands.Cog):
             footer += f" • Contraintes violées: {len(violations)}"
         embed.set_footer(text=footer)
         await inter.followup.send(embed=embed)
+        # ... calcule déjà 'teams', 'ratings', 'sizes_list', etc.
+
+        # 1) Envoi avec bouton Reroll
+        params = dict(
+            session="",                      # laisser vide => auto-YYYYMMDD dans teamroll
+            team_count=team_count,
+            sizes="",                        # on laisse vide et on passe sizes_list_override pour figer les tailles
+            with_groups=with_groups,
+            avoid_pairs=avoid_pairs,
+            members="",                      # pas de mentions: notre _generate_roll fera fallback snapshot OU on fournit 'selected_members'
+            mode=mode,
+            attempts=200,
+            commit=True,
+            # bonus: on reroll exactement sur ce set (les mêmes joueurs) et mêmes tailles
+            selected_members=selected,               # <- la liste de Member collectée en début de /team
+            sizes_list_override=sizes_list,          # <- fige les tailles
+        )
+
+        setattr(inter.client, "last_teamroll_params", params)
+        view = self.RerollView(self, params=params, author_id=inter.user.id, timeout=300)
+
+        await inter.followup.send(embed=embed, view=view)
+
+
 
         notes = []
         if imported_from_riot:
