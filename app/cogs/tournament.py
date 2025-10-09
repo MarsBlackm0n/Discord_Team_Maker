@@ -31,8 +31,11 @@ class TournamentCog(commands.Cog):
         name="tournament_use_last",
         description="Ajouter (ou créer puis ajouter) les joueurs du dernier /team ou /teamroll au tournoi actif."
     )
-    @app_commands.describe(name="Nom du tournoi (créé si aucun en cours).")
-    async def tournament_use_last(self, inter: discord.Interaction, name: str = "Tournoi"):
+    @app_commands.describe(
+        name="Nom du tournoi (créé si aucun en cours).",
+        dry_run="Aperçu sans écrire en base (False par défaut)."
+    )
+    async def tournament_use_last(self, inter: discord.Interaction, name: str = "Tournoi", dry_run: bool = False):
         await inter.response.defer(ephemeral=True, thinking=True)
 
         guild = inter.guild
@@ -52,22 +55,27 @@ class TournamentCog(commands.Cog):
 
         # 2) Trouver (ou créer) le tournoi actif
         t = await get_active_tournament(self.bot.settings.DB_PATH, guild.id)
-        if not t:
+
+        # En dry-run, on ne crée pas de tournoi s’il n’existe pas : on simule
+        created_now = False
+        if not t and not dry_run:
             tid = await create_tournament(self.bot.settings.DB_PATH, guild.id, name, inter.user.id)
-            # relire pour cohérence
             t = await get_active_tournament(self.bot.settings.DB_PATH, guild.id)
-        if not t:
-            await inter.followup.send("❌ Impossible de créer ou de récupérer un tournoi actif.", ephemeral=True)
-            return
-        tournament_id = int(t["id"])
+            created_now = True
+
+        tournament_id = int(t["id"]) if t else None
 
         # 3) Participants déjà présents pour éviter les doublons
-        existing = await list_participants(self.bot.settings.DB_PATH, tournament_id)
-        existing_ids = {int(p["user_id"]) for p in existing}
-        start_seed = 1 + len(existing_ids)
+        existing_ids = set()
+        if tournament_id is not None:
+            existing = await list_participants(self.bot.settings.DB_PATH, tournament_id)
+            existing_ids = {int(p["user_id"]) for p in existing}
+            start_seed = 1 + len(existing_ids)
+        else:
+            # Pas de tournoi actif (dry-run) : on simule une base vide
+            start_seed = 1
 
         # 4) Construire l’ordre d’inscription (par blocs d’équipe ; tri interne rating décroissant)
-        #    Et préparer un cache des ratings
         ratings_cache: dict[int, float] = {}
 
         async def _rating(uid: int) -> float:
@@ -76,7 +84,6 @@ class TournamentCog(commands.Cog):
                 ratings_cache[uid] = float(r) if r is not None else 1000.0
             return ratings_cache[uid]
 
-        # précharger les ratings pour trier sans va-et-vient
         for team in teams:
             for uid in team:
                 await _rating(uid)
@@ -85,19 +92,19 @@ class TournamentCog(commands.Cog):
         for team in teams:
             ordered.extend(sorted(team, key=lambda u: ratings_cache.get(u, 1000.0), reverse=True))
 
-        # 5) Ajouter en BDD en évitant les doublons
+        # 5) Ajouter (ou simuler)
         planned_rows = []
         added = 0
         seed = start_seed
         for uid in ordered:
             if uid in existing_ids:
                 planned_rows.append((seed, uid, ratings_cache.get(uid, 1000.0), True))
-                # seed suivant uniquement si on ajoute réellement un nouveau joueur ? On préfère maintenir
-                # une progression visible : on n'incrémente PAS le seed sur un doublon, car il n'est pas inscrit.
+                # seed non incrémenté car on ne crée pas une nouvelle entrée
                 continue
+
             planned_rows.append((seed, uid, ratings_cache.get(uid, 1000.0), False))
-            await add_participant(self.bot.settings.DB_PATH, tournament_id, uid, seed, float(ratings_cache[uid]))
-            existing_ids.add(uid)
+            if not dry_run and tournament_id is not None:
+                await add_participant(self.bot.settings.DB_PATH, tournament_id, uid, seed, float(ratings_cache[uid]))
             added += 1
             seed += 1
 
@@ -106,22 +113,38 @@ class TournamentCog(commands.Cog):
             m = guild.get_member(uid)
             return m.display_name if m else f"(id:{uid})"
 
-        title = f"👥 Import depuis la dernière configuration (mode: {mode}, équipes: {team_count})"
+        if dry_run:
+            title_prefix = "🧪 APERÇU (dry-run)"
+            footer_note = "Aucune écriture effectuée. Relance sans `dry_run` pour appliquer."
+            tour_label = (t["name"] if t else f"(sera créé : {name})")
+            tour_id_txt = (f"(id: `{tournament_id}`)" if tournament_id is not None else "(pas encore créé)")
+        else:
+            title_prefix = "👥 Import effectué"
+            footer_note = "—"
+            tour_label = t["name"] if t else name
+            tour_id_txt = f"(id: `{tournament_id}`)" if tournament_id is not None else ""
+
+        title = f"{title_prefix} — dernière config (mode: {mode}, équipes: {team_count})"
+
         desc_lines = []
-        # Aperçu limité pour ne pas saturer l'embed
         for s, uid, r, is_dup in planned_rows[:60]:
             dup = " *(déjà inscrit)*" if is_dup else ""
             desc_lines.append(f"{s:>2}. {_name(uid)} — **{int(r)}**{dup}")
 
-        embed = discord.Embed(title=title, color=discord.Color.green())
+        embed = discord.Embed(title=title, color=(discord.Color.orange() if dry_run else discord.Color.green()))
         embed.description = "\n".join(desc_lines) if desc_lines else "_Aucun joueur._"
-        embed.add_field(name="Tournoi", value=f"{t['name']} (id: `{tournament_id}`)", inline=True)
-        embed.add_field(name="Ajouts", value=str(added), inline=True)
-        embed.set_footer(text=("Aperçu limité à 60 lignes." if len(planned_rows) > 60 else ""))
+        embed.add_field(name="Tournoi", value=f"{tour_label} {tour_id_txt}".strip(), inline=True)
+        embed.add_field(name=("Ajouts possibles" if dry_run else "Ajouts effectués"), value=str(added), inline=True)
+        if created_now and not dry_run:
+            embed.add_field(name="Info", value="Un nouveau tournoi a été créé automatiquement.", inline=False)
+        if dry_run:
+            embed.set_footer(text=footer_note)
+        elif len(planned_rows) > 60:
+            embed.set_footer(text="Aperçu limité à 60 lignes.")
+
         await inter.followup.send(embed=embed, ephemeral=True)
 
     """Gestion d'un tournoi Single Elimination."""
-
     group = app_commands.Group(name="tournament", description="Gestion de tournoi")
 
     # ------- CREATE -------
@@ -171,7 +194,7 @@ class TournamentCog(commands.Cog):
             pairs.append((m, int(r) if r is not None else 1000))
         pairs.sort(key=lambda x: x[1], reverse=True)
 
-        # Attention à ne pas écraser les seeds existants : on se base sur le nombre de participants actuels
+        # Évite d'écraser les seeds existants
         existing = await list_participants(self.bot.settings.DB_PATH, t["id"])
         next_seed = 1 + len(existing)
 
@@ -201,10 +224,8 @@ class TournamentCog(commands.Cog):
             await inter.followup.send("❌ Il faut au moins 2 joueurs.", ephemeral=True); return
 
         user_ids_by_seed = [int(p["user_id"]) for p in part]  # déjà triés par seed ASC
-        # 1er passage : matches positionnels
         raw_matches = build_bracket_matches(user_ids_by_seed, best_of=best_of)
 
-        # On insère d'abord "placeholder" pour récupérer les IDs SQL
         await clear_bracket(self.bot.settings.DB_PATH, t["id"])
         for m in raw_matches:
             m["next_match_id"] = None
@@ -222,13 +243,10 @@ class TournamentCog(commands.Cog):
             } for m in raw_matches
         ])
 
-        # Relire pour obtenir l'ordre & IDs SQL
         created = await list_matches(self.bot.settings.DB_PATH, t["id"])
-        sql_ids = [row["id"] for row in created]  # même ordre d'insert
-        # Résoudre les next_match_id à partir des positions
+        sql_ids = [row["id"] for row in created]
         resolved = resolve_next_ids(sql_ids, raw_matches)
 
-        # Réécrire les next_match_id
         await clear_bracket(self.bot.settings.DB_PATH, t["id"])
         await create_matches(self.bot.settings.DB_PATH, t["id"], [
             {
@@ -243,11 +261,9 @@ class TournamentCog(commands.Cog):
             } for m in resolved
         ])
 
-        # Passer en running
         await set_tournament_state(self.bot.settings.DB_PATH, t["id"], "running", started=True)
 
         await inter.followup.send("✅ Tournoi démarré ! Utilisez `/tournament view` pour voir le bracket.", ephemeral=True)
-        # Affichage public du round 1
         await self._post_bracket(inter, t["id"], title=f"🏆 {t['name']} — Round 1")
 
     # ------- REPORT -------
