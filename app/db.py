@@ -7,6 +7,7 @@ from typing import Optional, Tuple, List, Set, Dict, Iterable
 import time
 import itertools
 import aiosqlite
+import json, time 
 
 
 # =========================
@@ -102,6 +103,13 @@ async def init_db(db_path: Path):
             count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (session_id, user_a, user_b),
             FOREIGN KEY(session_id) REFERENCES team_sessions(id) ON DELETE CASCADE
+        )""")
+
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS team_last (
+            guild_id TEXT PRIMARY KEY,
+            snapshot_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
         )""")
 
         # (Optionnel) index de perf si besoin de stats lourdes par session
@@ -446,3 +454,29 @@ async def session_stats(db_path: Path, session_id: int, user_ids: Iterable[int])
         if (a, b) in counts:
             seen += 1
     return seen, len(all_pairs)
+
+import json, time
+
+async def set_team_last(db_path: Path, guild_id: int, snapshot: dict) -> None:
+    payload = json.dumps(snapshot, ensure_ascii=False)
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("""
+            INSERT INTO team_last(guild_id, snapshot_json, updated_at)
+            VALUES(?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+              snapshot_json=excluded.snapshot_json,
+              updated_at=excluded.updated_at
+        """, (str(guild_id), payload, int(time.time())))
+        await db.commit()
+
+async def get_team_last(db_path: Path, guild_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute("SELECT snapshot_json FROM team_last WHERE guild_id=?", (str(guild_id),)) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            try:
+                return json.loads(row[0])
+            except Exception:
+                return None
+

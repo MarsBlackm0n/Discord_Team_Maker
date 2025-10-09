@@ -1,13 +1,13 @@
 # app/cogs/team.py
 from typing import List, Dict, Tuple
 import itertools
-
+import time 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from ..db import (
-    get_rating, set_rating,
+    get_rating, set_rating, set_team_last, get_team_last,
     get_or_create_session_id, load_pair_counts, bump_pair_counts, session_stats, end_session
 )
 
@@ -308,6 +308,25 @@ class TeamCog(commands.Cog):
                 await create_and_move_voice(inter, teams, sizes_list, ttl_minutes=max(channel_ttl, 1))
             except discord.Forbidden:
                 await inter.followup.send("⚠️ Permissions manquantes (Manage Channels / Move Members).")
+
+            # Sauvegarde "dernière config" (serveur)
+        try:
+            snapshot = {
+                "mode": mode.lower(),
+                "team_count": team_count,
+                "sizes": sizes_list,
+                "teams": [[m.id for m in t] for t in teams],
+                "ratings": {str(uid): float(r) for uid, r in ((m.id, ratings[m.id]) for m in sum(teams, []))},
+                "params": {
+                    "with_groups": with_groups, "avoid_pairs": avoid_pairs, "members": members,
+                    "session": "", "attempts": 0
+                },
+                "created_by": inter.user.id,
+                "created_at": int(time.time()),
+            }
+            await set_team_last(self.bot.settings.DB_PATH, inter.guild.id, snapshot)
+        except Exception:
+            pass
 
     # -------- /disbandteams --------
     @app_commands.command(name="disbandteams", description="Supprimer les salons vocaux d'équipe temporaires.")
