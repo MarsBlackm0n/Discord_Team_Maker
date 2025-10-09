@@ -478,6 +478,7 @@ async def get_team_last(db_path: Path, guild_id: int) -> Optional[dict]:
             except Exception:
                 return None
 
+
 async def set_next_links(db_path, tournament_id, updates):
     """
     updates: list[(match_id, next_match_id, next_slot)]
@@ -496,3 +497,71 @@ async def set_next_links(db_path, tournament_id, updates):
         sql = f"UPDATE {table} SET next_match_id=?, next_slot=? WHERE id=? AND tournament_id=?"
         await db.executemany(sql, ((nmid, slot, mid, tournament_id) for (mid, nmid, slot) in updates))
         await db.commit()
+
+
+# --- Historique compositions d'équipes (anti-répétition globale) ---
+
+async def _ensure_team_history_table(db):
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS team_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        session TEXT NOT NULL,
+        players_fp TEXT NOT NULL,
+        sizes_fp TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    """)
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_th_lookup ON team_history(guild_id, session, players_fp, sizes_fp);")
+    await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_th_unique ON team_history(guild_id, session, players_fp, sizes_fp, signature);")
+
+
+async def load_team_signatures(db_path: str, guild_id: int, session: str, players_fp: str, sizes_fp: str) -> set[str]:
+    import aiosqlite
+    async with aiosqlite.connect(db_path) as db:
+        await _ensure_team_history_table(db)
+        cur = await db.execute("""
+            SELECT signature
+            FROM team_history
+            WHERE guild_id=? AND session=? AND players_fp=? AND sizes_fp=?;
+        """, (guild_id, session, players_fp, sizes_fp))
+        rows = await cur.fetchall()
+        await cur.close()
+        return {r[0] for r in rows}
+
+
+async def add_team_signature(db_path: str, guild_id: int, session: str, players_fp: str, sizes_fp: str, signature: str, created_at: int) -> bool:
+    import aiosqlite
+    async with aiosqlite.connect(db_path) as db:
+        await _ensure_team_history_table(db)
+        try:
+            await db.execute("""
+                INSERT INTO team_history (guild_id, session, players_fp, sizes_fp, signature, created_at)
+                VALUES (?, ?, ?, ?, ?, ?);
+            """, (guild_id, session, players_fp, sizes_fp, signature, created_at))
+            await db.commit()
+            return True
+        except Exception:
+            # Signature déjà vue (unique constraint)
+            return False
+
+
+async def clear_team_signatures(db_path: str, guild_id: int, session: str, players_fp: str = "", sizes_fp: str = "") -> int:
+    """Efface l'historique pour une session (et éventuellement un fingerprint précis). Renvoie le nb de lignes supprimées."""
+    import aiosqlite
+    async with aiosqlite.connect(db_path) as db:
+        await _ensure_team_history_table(db)
+        if players_fp and sizes_fp:
+            cur = await db.execute("""
+                DELETE FROM team_history
+                WHERE guild_id=? AND session=? AND players_fp=? AND sizes_fp=?;
+            """, (guild_id, session, players_fp, sizes_fp))
+        else:
+            cur = await db.execute("""
+                DELETE FROM team_history
+                WHERE guild_id=? AND session=?;
+            """, (guild_id, session))
+        n = cur.rowcount if cur.rowcount is not None else 0
+        await db.commit()
+        return n

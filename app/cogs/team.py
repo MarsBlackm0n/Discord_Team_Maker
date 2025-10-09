@@ -2,6 +2,7 @@
 from typing import List, Dict, Tuple, Optional
 import itertools
 import time
+from datetime import datetime
 
 import discord
 from discord import app_commands
@@ -9,7 +10,8 @@ from discord.ext import commands
 
 from ..db import (
     get_rating, set_rating, set_team_last, get_team_last,
-    get_or_create_session_id, load_pair_counts, bump_pair_counts, session_stats, end_session
+    get_or_create_session_id, load_pair_counts, bump_pair_counts, session_stats, end_session,
+    load_team_signatures, add_team_signature, clear_team_signatures  # ⬅️ historique signatures
 )
 
 # Import gracieux : si le helper Riot n'existe pas encore, on ne plante pas
@@ -82,6 +84,32 @@ class TeamCog(commands.Cog):
 
         return ratings, used_default, imported
 
+    # -------- Helpers signatures (anti-répétition forte) --------
+    @staticmethod
+    def _players_fingerprint(members: List[discord.Member]) -> str:
+        """Empreinte déterministe de l'ensemble de joueurs (ordre indépendant)."""
+        ids = sorted(m.id for m in members if not m.bot)
+        return "P:" + ",".join(str(i) for i in ids)
+
+    @staticmethod
+    def _composition_signature(teams: List[List[discord.Member]]) -> str:
+        """
+        Signature canonique d'une composition :
+        - joueurs de chaque équipe triés
+        - équipes triées entre elles
+        -> indépendante de l'ordre d'affichage
+        """
+        team_chunks = []
+        for t in teams:
+            ids = sorted(m.id for m in t if not m.bot)
+            team_chunks.append("-".join(str(x) for x in ids))
+        team_chunks.sort()
+        return "|".join(team_chunks)
+
+    @staticmethod
+    def _sizes_fingerprint(sizes: List[int]) -> str:
+        return "S:" + ",".join(str(s) for s in sizes)
+
     # -------- Helper commun : génération d'un roll --------
     async def _generate_roll(
         self,
@@ -96,21 +124,38 @@ class TeamCog(commands.Cog):
         mode: str,
         attempts: int,
         commit: bool,
+        # --- ajouts pour réutiliser le dernier /team ---
+        selected_members: Optional[List[discord.Member]] = None,
+        sizes_list_override: Optional[List[int]] = None,
     ) -> tuple[discord.Embed, List[List[discord.Member]], Dict[int, float]]:
         guild = inter.guild
         if not guild:
             raise RuntimeError("Cette commande doit être utilisée dans un serveur.")
 
         # 1) Collecte joueurs
-        author = inter.user if isinstance(inter.user, discord.Member) else guild.get_member(inter.user.id)
-        if members:
-            selected: List[discord.Member] = parse_mentions(guild, members)
+        if selected_members is not None:
+            selected: List[discord.Member] = selected_members
         else:
-            if isinstance(author, discord.Member) and author.voice and author.voice.channel:
-                selected = [m for m in author.voice.channel.members if not m.bot]
+            author = inter.user if isinstance(inter.user, discord.Member) else guild.get_member(inter.user.id)
+            if members:
+                selected = parse_mentions(guild, members)
             else:
-                raise RuntimeError("Pas de liste fournie et tu n'es pas en vocal.")
-
+                if isinstance(author, discord.Member) and author.voice and author.voice.channel:
+                    selected = [m for m in author.voice.channel.members if not m.bot]
+                else:
+                    # Fallback snapshot auto si pas de liste et pas en vocal
+                    snap = await get_team_last(self.bot.settings.DB_PATH, guild.id)
+                    if snap and snap.get("teams"):
+                        ids = [int(uid) for team_ids in snap["teams"] for uid in team_ids]
+                        look = {m.id: m for m in guild.members}
+                        selected = [look[i] for i in ids if i in look and not look[i].bot]
+                        if not selected:
+                            raise RuntimeError("Pas de liste fournie, pas en vocal, et la dernière config n'est pas résoluble.")
+                        if not sizes.strip():
+                            sizes_list_override = [len(team_ids) for team_ids in snap["teams"]]
+                            team_count = len(sizes_list_override)
+                    else:
+                        raise RuntimeError("Pas de liste fournie et tu n'es pas en vocal.")
         if len(selected) < team_count:
             raise RuntimeError(f"Pas assez de joueurs pour {team_count} équipes.")
 
@@ -118,14 +163,25 @@ class TeamCog(commands.Cog):
         ratings, used_default, imported_from_riot = await self.ensure_ratings_for_members(
             selected, auto_import_riot=True
         )
-        sizes_list = parse_sizes(sizes, len(selected), team_count)
+
+        if sizes_list_override is not None:
+            sizes_list = sizes_list_override
+        else:
+            sizes_list = parse_sizes(sizes, len(selected), team_count)
+
         with_groups_list = group_by_with_constraints(guild, selected, with_groups) if with_groups else [[m] for m in selected]
         avoid_pairs_set = parse_avoid_pairs(guild, avoid_pairs)
 
-        # 3) Session & compteurs de paires
+        # 3) Session, compteurs de paires & signatures déjà vues
         sid = await get_or_create_session_id(self.bot.settings.DB_PATH, guild.id, session)
         pair_counts = await load_pair_counts(self.bot.settings.DB_PATH, sid)
         pair_counts = {tuple(sorted(k)): v for k, v in pair_counts.items()}
+
+        players_fp = self._players_fingerprint(selected)
+        sizes_fp = self._sizes_fingerprint(sizes_list)
+        seen_signatures = await load_team_signatures(
+            self.bot.settings.DB_PATH, guild.id, session, players_fp, sizes_fp
+        )
 
         def penalty(teams: List[List[discord.Member]]) -> Tuple[int, int]:
             """Retourne (penalty_repetition, spread_totals)."""
@@ -138,9 +194,10 @@ class TeamCog(commands.Cog):
             spread = max(totals) - min(totals) if totals else 0
             return rep, spread
 
-        # 4) Recherche de la meilleure combinaison
+        # 4) Recherche de la meilleure combinaison (priorité aux inédites)
         BEST: Optional[tuple[int, int, List[List[discord.Member]]]] = None
-        attempts = max(20, min(2000, int(attempts)))
+        BEST_UNSEEN: Optional[List[List[discord.Member]]] = None
+        attempts = max(50, min(5000, int(attempts)))
         for _ in range(attempts):
             if mode.lower() == "random":
                 cand = split_random(selected, team_count, sizes_list)
@@ -148,16 +205,31 @@ class TeamCog(commands.Cog):
                 cand, _viol = balance_k_teams_with_constraints(
                     selected, ratings, team_count, sizes_list, with_groups_list, avoid_pairs_set
                 )
+
+            sig = self._composition_signature(cand)
+            if sig not in seen_signatures and BEST_UNSEEN is None:
+                BEST_UNSEEN = cand  # 1ère inédite trouvée
+
             rep, spr = penalty(cand)
             if (BEST is None) or (rep, spr) < (BEST[0], BEST[1]):
                 BEST = (rep, spr, cand)
-            if BEST and BEST[0] == 0:
-                break
+
+            if BEST_UNSEEN is not None and rep == 0:
+                break  # inédite et parfaite côté paires
 
         if BEST is None:
             raise RuntimeError("Impossible de générer des équipes.")
 
-        rep, spr, teams = BEST
+        if BEST_UNSEEN is not None:
+            teams = BEST_UNSEEN
+            exhausted = False
+            # rep/spr pour affichage (recalcule léger)
+            rep, spr = penalty(teams)
+        else:
+            # toutes les signatures déjà vues pour ce set/tailles/session
+            _, _, teams = BEST
+            exhausted = True
+            rep, spr = BEST[0], BEST[1]
 
         # 5) Affichage
         embed = discord.Embed(title=f"🎲 Team Roll — session: {session}", color=discord.Color.blurple())
@@ -173,14 +245,23 @@ class TeamCog(commands.Cog):
         # progression couverture des paires pour CE set de joueurs
         seen, possible = await session_stats(self.bot.settings.DB_PATH, sid, [m.id for m in selected])
         footer = f"Répétitions évitées: {max(0, rep)} • Δ totals: {spr} • Couverture paires: {seen}/{possible}"
+        if exhausted:
+            footer += " • ⚠️ Toutes les compositions possibles déjà vues pour cette session / ce set."
         embed.set_footer(text=footer)
 
         # 6) Commit dans l’historique (optionnel)
         if commit:
+            # historise les paires
             await bump_pair_counts(
                 self.bot.settings.DB_PATH,
                 sid,
                 [[m.id for m in t] for t in teams]
+            )
+            # historise la signature forte
+            sig = self._composition_signature(teams)
+            await add_team_signature(
+                self.bot.settings.DB_PATH,
+                guild.id, session, players_fp, sizes_fp, sig, int(time.time())
             )
 
         return embed, teams, ratings
@@ -312,7 +393,7 @@ class TeamCog(commands.Cog):
             except discord.Forbidden:
                 await inter.followup.send("⚠️ Permissions manquantes (Manage Channels / Move Members).")
 
-        # Sauvegarde "dernière config" (serveur) — toujours, indépendamment de create_voice
+        # Sauvegarde "dernière config" (serveur)
         try:
             snapshot = {
                 "mode": mode.lower(),
@@ -352,23 +433,23 @@ class TeamCog(commands.Cog):
         await inter.response.send_message(f"🧹 Salons supprimés: {count}", ephemeral=True)
 
     # -------- /teamroll --------
-    @app_commands.command(name="teamroll", description="Générer une nouvelle combinaison inédite (par session).")
+    @app_commands.command(name="teamroll", description="Relance un tirage à partir de la DERNIÈRE config /team (fallback auto), en évitant les répétitions.")
     @app_commands.describe(
-        session="Nom de la session (ex: 'soirée-08-10', même nom sur chaque roll)",
-        team_count="Nombre d'équipes (2–6, défaut 2)",
-        sizes='Tailles fixées (ex: "3/3/2")',
+        session="Nom de la session (ex: 'soirée-08-10'). Si vide: auto-YYYYMMDD",
+        team_count="Nombre d'équipes (si vide, reprend celui du dernier /team)",
+        sizes='Tailles fixées (ex: "3/3/2"). Si vide, reprend celles du dernier /team',
         with_groups='Groupes ensemble (ex: "@A @B | @C @D")',
         avoid_pairs='Paires à séparer (ex: "@A @B ; @C @D")',
-        members="(Optionnel) liste de @mentions si pas de vocal",
+        members="(Optionnel) liste de @mentions; sinon vocal; sinon dernière config /team",
         mode="balanced (défaut) ou random",
         attempts="Nombre d’essais à explorer (défaut 200)",
-        commit="Sauvegarder le roll dans l’historique (défaut: true)"
+        commit="Sauvegarder le roll dans l’historique de session (défaut: true)"
     )
     async def teamroll(
         self,
         inter: discord.Interaction,
-        session: str,
-        team_count: int = 2,
+        session: str = "",
+        team_count: Optional[int] = None,
         sizes: str = "",
         with_groups: str = "",
         avoid_pairs: str = "",
@@ -378,6 +459,55 @@ class TeamCog(commands.Cog):
         commit: bool = True
     ):
         await inter.response.defer(thinking=True)
+
+        guild = inter.guild
+        if not guild:
+            await inter.followup.send("❌ À utiliser en serveur.", ephemeral=True)
+            return
+
+        # Fallback session automatique
+        if not session.strip():
+            session = f"auto-{datetime.utcnow().strftime('%Y%m%d')}"
+
+        # Fallback snapshot si pas de mentions et pas en vocal
+        selected_members: Optional[List[discord.Member]] = None
+        sizes_list_override: Optional[List[int]] = None
+
+        need_snapshot_fallback = False
+        if not members.strip():
+            author = guild.get_member(inter.user.id)
+            if not (author and author.voice and author.voice.channel):
+                need_snapshot_fallback = True
+
+        if need_snapshot_fallback:
+            snap = await get_team_last(self.bot.settings.DB_PATH, guild.id)
+            if not snap or not snap.get("teams"):
+                await inter.followup.send("ℹ️ Aucune **dernière configuration d’équipes** trouvée. Utilise d’abord `/team`.", ephemeral=True)
+                return
+
+            lookup = {m.id: m for m in guild.members}
+            selected_members = []
+            for team_ids in snap["teams"]:
+                for uid in team_ids:
+                    m = lookup.get(int(uid))
+                    if m and not m.bot:
+                        selected_members.append(m)
+
+            if team_count is None:
+                team_count = int(snap.get("team_count", len(snap["teams"])))
+            if not sizes.strip():
+                sizes_list_override = [len(team_ids) for team_ids in snap["teams"]]
+
+            meta = snap.get("params", {}) or {}
+            if not with_groups:
+                with_groups = meta.get("with_groups", "")
+            if not avoid_pairs:
+                avoid_pairs = meta.get("avoid_pairs", "")
+
+        if team_count is None:
+            await inter.followup.send("❌ Impossible de déterminer le nombre d'équipes (aucune source).", ephemeral=True)
+            return
+
         try:
             embed, teams, ratings = await self._generate_roll(
                 inter,
@@ -390,14 +520,20 @@ class TeamCog(commands.Cog):
                 mode=mode,
                 attempts=attempts,
                 commit=commit,
+                selected_members=selected_members,
+                sizes_list_override=sizes_list_override,
             )
         except Exception as e:
-            await inter.followup.send(f"❌ {e}")
+            await inter.followup.send(f"❌ {e}", ephemeral=True)
             return
 
         # Sauvegarde "dernière config" (serveur)
         try:
-            sizes_list = parse_sizes(sizes, sum(len(t) for t in teams), team_count)
+            if sizes_list_override is not None:
+                sizes_list = sizes_list_override
+            else:
+                sizes_list = parse_sizes(sizes, sum(len(t) for t in teams), team_count)
+
             snapshot = {
                 "mode": mode.lower(),
                 "team_count": team_count,
@@ -419,9 +555,9 @@ class TeamCog(commands.Cog):
         params = dict(
             session=session, team_count=team_count, sizes=sizes,
             with_groups=with_groups, avoid_pairs=avoid_pairs,
-            members=members, mode=mode, attempts=attempts, commit=commit
+            members=members, mode=mode, attempts=attempts, commit=commit,
+            selected_members=selected_members, sizes_list_override=sizes_list_override,
         )
-        # Fallback global (non parfait) si la view perd ses params :
         setattr(inter.client, "last_teamroll_params", params)
 
         view = self.RerollView(self, params=params, author_id=inter.user.id, timeout=300)
@@ -483,7 +619,6 @@ class TeamCog(commands.Cog):
 
         sizes = snap.get("sizes") or [len(t) for t in teams]
         try:
-            # create_and_move_voice doit gérer la réutilisation si tu as patché voice.py
             await create_and_move_voice(
                 inter,
                 teams,
@@ -494,8 +629,8 @@ class TeamCog(commands.Cog):
         except discord.Forbidden:
             await inter.followup.send("⚠️ Permissions manquantes (Manage Channels / Move Members).", ephemeral=True)
 
-    # -------- /teamroll_end --------
-    @app_commands.command(name="teamroll_end", description="Terminer/effacer une session de roll (réinitialise l’historique).")
+    # -------- /teamroll_end (pairs) --------
+    @app_commands.command(name="teamroll_end", description="Terminer/effacer une session de roll (réinitialise l’historique des paires).")
     @app_commands.describe(session="Nom de la session à terminer")
     async def teamroll_end(self, inter: discord.Interaction, session: str):
         if not inter.guild:
@@ -506,14 +641,45 @@ class TeamCog(commands.Cog):
             return
         ok = await end_session(self.bot.settings.DB_PATH, inter.guild.id, session)
         if ok:
-            await inter.response.send_message(f"🧹 Session `{session}` supprimée.", ephemeral=True)
+            await inter.response.send_message(f"🧹 Session `{session}` supprimée (paires).", ephemeral=True)
         else:
             await inter.response.send_message(f"ℹ️ Session `{session}` introuvable.", ephemeral=True)
+
+    # -------- /teamroll_reset (signatures fortes) --------
+    @app_commands.command(name="teamroll_reset", description="Réinitialiser l'historique des compositions (signatures) pour une session.")
+    @app_commands.describe(session="Nom de la session", for_current_snapshot="Limiter le reset au set/tailles de la dernière config /team")
+    async def teamroll_reset(self, inter: discord.Interaction, session: str, for_current_snapshot: bool = False):
+        if not inter.guild:
+            await inter.response.send_message("❌ À utiliser sur un serveur.", ephemeral=True)
+            return
+        if not inter.user.guild_permissions.administrator:
+            await inter.response.send_message("⛔ Réservé aux admins.", ephemeral=True)
+            return
+
+        players_fp = ""
+        sizes_fp = ""
+        if for_current_snapshot:
+            snap = await get_team_last(self.bot.settings.DB_PATH, inter.guild.id)
+            if not snap or not snap.get("teams"):
+                await inter.response.send_message("ℹ️ Pas de snapshot /team pour cibler un set précis.", ephemeral=True)
+                return
+            lookup = {m.id: m for m in inter.guild.members}
+            selected: List[discord.Member] = []
+            for team_ids in snap["teams"]:
+                for uid in team_ids:
+                    m = lookup.get(int(uid))
+                    if m and not m.bot:
+                        selected.append(m)
+            players_fp = self._players_fingerprint(selected)
+            sizes_fp = self._sizes_fingerprint([len(team_ids) for team_ids in snap["teams"]])
+
+        n = await clear_team_signatures(self.bot.settings.DB_PATH, inter.guild.id, session, players_fp, sizes_fp)
+        await inter.response.send_message(f"🧽 Historique des compositions réinitialisé ({n} entrées supprimées).", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
     cog = TeamCog(bot)
     await bot.add_cog(cog)
-
-    # ✅ Ajouter la view persistante au démarrage (le custom_id doit correspondre au bouton)
+    # ✅ View persistante au démarrage (le custom_id doit correspondre au bouton)
     bot.add_view(TeamCog.RerollView(cog, timeout=None))
+
