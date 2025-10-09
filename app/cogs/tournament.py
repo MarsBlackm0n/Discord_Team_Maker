@@ -244,6 +244,7 @@ class TournamentCog(commands.Cog):
         ])
 
         created = await list_matches(self.bot.settings.DB_PATH, t["id"])
+        created.sort(key=lambda r: (r["round"], r["pos_in_round"]))  # <— ordre déterministe
         sql_ids = [row["id"] for row in created]
         resolved = resolve_next_ids(sql_ids, raw_matches)
 
