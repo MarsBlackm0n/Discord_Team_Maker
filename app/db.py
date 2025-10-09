@@ -1,26 +1,38 @@
 # app/db.py
-
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Tuple, List, Set, Dict, Any
+from typing import Optional, Tuple, List, Set, Dict, Iterable
 
 import time
+import itertools
 import aiosqlite
 
 
+# =========================
+# Init DB (toutes les tables)
+# =========================
 async def init_db(db_path: Path):
     async with aiosqlite.connect(db_path) as db:
-        await db.execute("""CREATE TABLE IF NOT EXISTS skills (
+        # Important pour ON DELETE CASCADE
+        await db.execute("PRAGMA foreign_keys = ON;")
+
+        # ---- Skills / Liens LoL / Rang LoL ----
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS skills (
             user_id TEXT PRIMARY KEY,
             rating REAL NOT NULL
         )""")
-        await db.execute("""CREATE TABLE IF NOT EXISTS lol_links (
+
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS lol_links (
             user_id TEXT PRIMARY KEY,
             summoner_name TEXT NOT NULL,
             region TEXT NOT NULL
         )""")
-        await db.execute("""CREATE TABLE IF NOT EXISTS lol_rank (
+
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS lol_rank (
             user_id TEXT PRIMARY KEY,
             source TEXT NOT NULL, -- offline/riot
             tier TEXT NOT NULL,
@@ -29,8 +41,9 @@ async def init_db(db_path: Path):
             updated_at INTEGER NOT NULL
         )""")
 
-        # ======== TOURNOI ========
-        await db.execute("""CREATE TABLE IF NOT EXISTS tournaments (
+        # ---- Tournoi ----
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS tournaments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             guild_id TEXT NOT NULL,
             name TEXT NOT NULL,
@@ -39,7 +52,9 @@ async def init_db(db_path: Path):
             created_at INTEGER NOT NULL,
             started_at INTEGER
         )""")
-        await db.execute("""CREATE TABLE IF NOT EXISTS tournament_participants (
+
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS tournament_participants (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tournament_id INTEGER NOT NULL,
             user_id TEXT NOT NULL,
@@ -47,7 +62,9 @@ async def init_db(db_path: Path):
             rating REAL NOT NULL,
             UNIQUE(tournament_id, user_id)
         )""")
-        await db.execute("""CREATE TABLE IF NOT EXISTS tournament_matches (
+
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS tournament_matches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tournament_id INTEGER NOT NULL,
             round INTEGER NOT NULL,
@@ -62,15 +79,49 @@ async def init_db(db_path: Path):
             next_match_id INTEGER,
             next_slot INTEGER -- 1 ou 2 (position dans le match suivant)
         )""")
+
+        # ---- TeamRolls (sessions & paires) ----
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS team_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )""")
+
+        await db.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_team_sessions_unique
+        ON team_sessions(guild_id, name)
+        """)
+
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS team_pair_counts (
+            session_id INTEGER NOT NULL,
+            user_a TEXT NOT NULL,
+            user_b TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (session_id, user_a, user_b),
+            FOREIGN KEY(session_id) REFERENCES team_sessions(id) ON DELETE CASCADE
+        )""")
+
+        # (Optionnel) index de perf si besoin de stats lourdes par session
+        await db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_team_pairs_by_session
+        ON team_pair_counts(session_id)
+        """)
+
         await db.commit()
 
 
+# =========================
 # Repos Skills
+# =========================
 async def get_rating(db_path: Path, user_id: int) -> Optional[float]:
     async with aiosqlite.connect(db_path) as db:
         async with db.execute("SELECT rating FROM skills WHERE user_id=?", (str(user_id),)) as cur:
             row = await cur.fetchone()
             return float(row[0]) if row else None
+
 
 async def set_rating(db_path: Path, user_id: int, rating: float):
     async with aiosqlite.connect(db_path) as db:
@@ -81,12 +132,16 @@ async def set_rating(db_path: Path, user_id: int, rating: float):
         )
         await db.commit()
 
+
+# =========================
 # Repos Liens LoL
+# =========================
 async def get_linked_lol(db_path: Path, user_id: int) -> Optional[Tuple[str, str]]:
     async with aiosqlite.connect(db_path) as db:
         async with db.execute("SELECT summoner_name, region FROM lol_links WHERE user_id=?", (str(user_id),)) as cur:
             row = await cur.fetchone()
             return (row[0], row[1]) if row else None
+
 
 async def link_lol(db_path: Path, user_id: int, summoner: str, region: str):
     async with aiosqlite.connect(db_path) as db:
@@ -97,8 +152,18 @@ async def link_lol(db_path: Path, user_id: int, summoner: str, region: str):
         )
         await db.commit()
 
+
+# =========================
 # Repos Rang LoL “humain”
-async def set_lol_rank(db_path: Path, user_id: int, source: str, tier: str, division: Optional[str], lp: int):
+# =========================
+async def set_lol_rank(
+    db_path: Path,
+    user_id: int,
+    source: str,
+    tier: str,
+    division: Optional[str],
+    lp: int
+):
     async with aiosqlite.connect(db_path) as db:
         await db.execute("""
         INSERT INTO lol_rank (user_id, source, tier, division, lp, updated_at)
@@ -109,29 +174,38 @@ async def set_lol_rank(db_path: Path, user_id: int, source: str, tier: str, divi
         """, (str(user_id), source, tier.upper(), division, int(lp or 0), int(time.time())))
         await db.commit()
 
-async def fetch_all_ratings_and_links(db_path: Path) -> tuple[list[tuple[int, float]], set[int], dict[int, tuple[str, Optional[str], int]]]:
+
+async def fetch_all_ratings_and_links(
+    db_path: Path
+) -> tuple[list[tuple[int, float]], set[int], dict[int, tuple[str, Optional[str], int]]]:
     rows: list[tuple[int, float]] = []
     linked: set[int] = set()
     ranks: dict[int, tuple[str, Optional[str], int]] = {}
     async with aiosqlite.connect(db_path) as db:
         async with db.execute("SELECT user_id, rating FROM skills") as cur:
             async for uid, rating in cur:
-                try: rows.append((int(uid), float(rating)))
-                except: pass
+                try:
+                    rows.append((int(uid), float(rating)))
+                except Exception:
+                    pass
         async with db.execute("SELECT user_id FROM lol_links") as cur:
             async for (uid,) in cur:
-                try: linked.add(int(uid))
-                except: pass
+                try:
+                    linked.add(int(uid))
+                except Exception:
+                    pass
         async with db.execute("SELECT user_id, tier, division, lp FROM lol_rank") as cur:
             async for uid, tier, division, lp in cur:
-                try: ranks[int(uid)] = (str(tier or ""), (division if division else None), int(lp or 0))
-                except: pass
+                try:
+                    ranks[int(uid)] = (str(tier or ""), (division if division else None), int(lp or 0))
+                except Exception:
+                    pass
     return rows, linked, ranks
 
-# ======== REPO TOURNOI ========
-import time
-from typing import Any
 
+# =========================
+# Repos Tournoi
+# =========================
 async def create_tournament(db_path: Path, guild_id: int, name: str, created_by: int) -> int:
     async with aiosqlite.connect(db_path) as db:
         await db.execute(
@@ -143,44 +217,58 @@ async def create_tournament(db_path: Path, guild_id: int, name: str, created_by:
         (tid,) = await cur.fetchone()
         return int(tid)
 
+
 async def get_active_tournament(db_path: Path, guild_id: int) -> Optional[dict]:
     async with aiosqlite.connect(db_path) as db:
-        async with db.execute("SELECT * FROM tournaments WHERE guild_id=? AND state IN ('setup','running') ORDER BY id DESC LIMIT 1",
-                              (str(guild_id),)) as cur:
+        async with db.execute(
+            "SELECT * FROM tournaments WHERE guild_id=? AND state IN ('setup','running') ORDER BY id DESC LIMIT 1",
+            (str(guild_id),)
+        ) as cur:
             row = await cur.fetchone()
-            if not row: return None
+            if not row:
+                return None
             cols = [c[0] for c in cur.description]
             return dict(zip(cols, row))
+
 
 async def set_tournament_state(db_path: Path, tournament_id: int, new_state: str, started: bool = False):
     async with aiosqlite.connect(db_path) as db:
         if started:
-            await db.execute("UPDATE tournaments SET state=?, started_at=? WHERE id=?",
-                             (new_state, int(time.time()), int(tournament_id)))
+            await db.execute(
+                "UPDATE tournaments SET state=?, started_at=? WHERE id=?",
+                (new_state, int(time.time()), int(tournament_id))
+            )
         else:
             await db.execute("UPDATE tournaments SET state=? WHERE id=?", (new_state, int(tournament_id)))
         await db.commit()
 
+
 async def add_participant(db_path: Path, tournament_id: int, user_id: int, seed: int, rating: float):
     async with aiosqlite.connect(db_path) as db:
-        await db.execute("""INSERT OR IGNORE INTO tournament_participants
-            (tournament_id, user_id, seed, rating) VALUES (?, ?, ?, ?)""",
-            (int(tournament_id), str(user_id), int(seed), float(rating)))
+        await db.execute(
+            "INSERT OR IGNORE INTO tournament_participants (tournament_id, user_id, seed, rating) VALUES (?, ?, ?, ?)",
+            (int(tournament_id), str(user_id), int(seed), float(rating))
+        )
         await db.commit()
+
 
 async def list_participants(db_path: Path, tournament_id: int) -> list[dict]:
     async with aiosqlite.connect(db_path) as db:
-        async with db.execute("""SELECT user_id, seed, rating
-                                 FROM tournament_participants
-                                 WHERE tournament_id=?
-                                 ORDER BY seed ASC""", (int(tournament_id),)) as cur:
+        async with db.execute("""
+            SELECT user_id, seed, rating
+            FROM tournament_participants
+            WHERE tournament_id=?
+            ORDER BY seed ASC
+        """, (int(tournament_id),)) as cur:
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, row)) async for row in cur]
+
 
 async def clear_bracket(db_path: Path, tournament_id: int):
     async with aiosqlite.connect(db_path) as db:
         await db.execute("DELETE FROM tournament_matches WHERE tournament_id=?", (int(tournament_id),))
         await db.commit()
+
 
 async def create_matches(db_path: Path, tournament_id: int, matches: list[dict]):
     """
@@ -189,29 +277,37 @@ async def create_matches(db_path: Path, tournament_id: int, matches: list[dict])
     """
     async with aiosqlite.connect(db_path) as db:
         for m in matches:
-            await db.execute("""INSERT INTO tournament_matches
+            await db.execute("""
+                INSERT INTO tournament_matches
                 (tournament_id, round, pos_in_round, p1_user_id, p2_user_id, best_of, status, next_match_id, next_slot)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (int(tournament_id), int(m["round"]), int(m["pos_in_round"]),
-                 str(m.get("p1_user_id")) if m.get("p1_user_id") else None,
-                 str(m.get("p2_user_id")) if m.get("p2_user_id") else None,
-                 int(m.get("best_of", 1)), m.get("status", "pending"),
-                 m.get("next_match_id"), m.get("next_slot")))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                int(tournament_id), int(m["round"]), int(m["pos_in_round"]),
+                str(m.get("p1_user_id")) if m.get("p1_user_id") else None,
+                str(m.get("p2_user_id")) if m.get("p2_user_id") else None,
+                int(m.get("best_of", 1)), m.get("status", "pending"),
+                m.get("next_match_id"), m.get("next_slot")
+            ))
         await db.commit()
+
 
 async def list_matches(db_path: Path, tournament_id: int) -> list[dict]:
     async with aiosqlite.connect(db_path) as db:
-        async with db.execute("""SELECT * FROM tournament_matches
-                                 WHERE tournament_id=?
-                                 ORDER BY round ASC, pos_in_round ASC""", (int(tournament_id),)) as cur:
+        async with db.execute("""
+            SELECT * FROM tournament_matches
+            WHERE tournament_id=?
+            ORDER BY round ASC, pos_in_round ASC
+        """, (int(tournament_id),)) as cur:
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, row)) async for row in cur]
+
 
 async def update_match_participant(db_path: Path, match_id: int, slot: int, user_id: int):
     col = "p1_user_id" if slot == 1 else "p2_user_id"
     async with aiosqlite.connect(db_path) as db:
         await db.execute(f"UPDATE tournament_matches SET {col}=? WHERE id=?", (str(user_id), int(match_id)))
         await db.commit()
+
 
 async def set_match_open_if_ready(db_path: Path, match_id: int):
     async with aiosqlite.connect(db_path) as db:
@@ -221,23 +317,35 @@ async def set_match_open_if_ready(db_path: Path, match_id: int):
                 await db.execute("UPDATE tournament_matches SET status='open' WHERE id=?", (int(match_id),))
                 await db.commit()
 
-async def report_match_result(db_path: Path, tournament_id: int, match_id: int, winner_user_id: int, p1_score: int, p2_score: int) -> Optional[int]:
+
+async def report_match_result(
+    db_path: Path,
+    tournament_id: int,
+    match_id: int,
+    winner_user_id: int,
+    p1_score: int,
+    p2_score: int
+) -> Optional[int]:
     """
     Met à jour le match, propage le vainqueur au match suivant.
     Retourne l'ID du match suivant (ou None).
     """
     async with aiosqlite.connect(db_path) as db:
-        async with db.execute("""SELECT id, p1_user_id, p2_user_id, next_match_id, next_slot
-                                 FROM tournament_matches WHERE id=? AND tournament_id=?""",
-                              (int(match_id), int(tournament_id))) as cur:
+        async with db.execute("""
+            SELECT id, p1_user_id, p2_user_id, next_match_id, next_slot
+            FROM tournament_matches
+            WHERE id=? AND tournament_id=?
+        """, (int(match_id), int(tournament_id))) as cur:
             row = await cur.fetchone()
-            if not row: return None
+            if not row:
+                return None
             _id, p1, p2, next_id, next_slot = row
 
-        await db.execute("""UPDATE tournament_matches
-                            SET winner_user_id=?, p1_score=?, p2_score=?, status='done'
-                            WHERE id=? AND tournament_id=?""",
-                         (str(winner_user_id), int(p1_score), int(p2_score), int(match_id), int(tournament_id)))
+        await db.execute("""
+            UPDATE tournament_matches
+            SET winner_user_id=?, p1_score=?, p2_score=?, status='done'
+            WHERE id=? AND tournament_id=?
+        """, (str(winner_user_id), int(p1_score), int(p2_score), int(match_id), int(tournament_id)))
         await db.commit()
 
         if next_id:
@@ -245,3 +353,96 @@ async def report_match_result(db_path: Path, tournament_id: int, match_id: int, 
             await set_match_open_if_ready(db_path, int(next_id))
             return int(next_id)
         return None
+
+
+# =========================
+# Repos TeamRolls
+# =========================
+async def get_or_create_session_id(db_path: Path, guild_id: int, name: str) -> int:
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute(
+            "SELECT id FROM team_sessions WHERE guild_id=? AND name=?",
+            (str(guild_id), name)
+        ) as cur:
+            row = await cur.fetchone()
+            if row:
+                return int(row[0])
+        await db.execute(
+            "INSERT INTO team_sessions(guild_id, name, created_at) VALUES(?,?,?)",
+            (str(guild_id), name, int(time.time()))
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT id FROM team_sessions WHERE guild_id=? AND name=?",
+            (str(guild_id), name)
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0])
+
+
+async def load_pair_counts(db_path: Path, session_id: int) -> Dict[Tuple[int, int], int]:
+    out: Dict[Tuple[int, int], int] = {}
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute(
+            "SELECT user_a, user_b, count FROM team_pair_counts WHERE session_id=?",
+            (session_id,)
+        ) as cur:
+            async for ua, ub, c in cur:
+                out[(int(ua), int(ub))] = int(c)
+    return out
+
+
+async def bump_pair_counts(db_path: Path, session_id: int, teams: Iterable[Iterable[int]]) -> None:
+    """Incrémente le compteur pour chaque paire de coéquipiers de cette combinaison."""
+    pairs: Dict[Tuple[int, int], int] = {}
+    for team in teams:
+        members = list(team)
+        for a, b in itertools.combinations(sorted(members), 2):
+            key = (a, b)
+            pairs[key] = pairs.get(key, 0) + 1
+
+    if not pairs:
+        return
+
+    async with aiosqlite.connect(db_path) as db:
+        # upsert pour chaque paire
+        for (a, b), inc in pairs.items():
+            await db.execute("""
+                INSERT INTO team_pair_counts(session_id, user_a, user_b, count)
+                VALUES(?,?,?,?)
+                ON CONFLICT(session_id, user_a, user_b)
+                DO UPDATE SET count = count + excluded.count
+            """, (session_id, str(a), str(b), int(inc)))
+        await db.commit()
+
+
+async def end_session(db_path: Path, guild_id: int, name: str) -> int:
+    """Supprime la session + ses compteurs. Retourne 1 si supprimée, 0 sinon."""
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute(
+            "SELECT id FROM team_sessions WHERE guild_id=? AND name=?",
+            (str(guild_id), name)
+        ) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return 0
+        sid = int(row[0])
+        await db.execute("DELETE FROM team_pair_counts WHERE session_id=?", (sid,))
+        await db.execute("DELETE FROM team_sessions WHERE id=?", (sid,))
+        await db.commit()
+        return 1
+
+
+async def session_stats(db_path: Path, session_id: int, user_ids: Iterable[int]) -> Tuple[int, int]:
+    """
+    Retourne (paires_vues, paires_possibles) pour le set de joueurs courant.
+    Utile pour afficher une progression “tout le monde a joué avec tout le monde”.
+    """
+    ids = sorted(set(int(x) for x in user_ids))
+    all_pairs = set(itertools.combinations(ids, 2))
+    seen = 0
+    counts = await load_pair_counts(db_path, session_id)
+    for a, b in all_pairs:
+        if (a, b) in counts:
+            seen += 1
+    return seen, len(all_pairs)
