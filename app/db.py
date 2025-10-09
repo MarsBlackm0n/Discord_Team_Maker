@@ -7,7 +7,7 @@ from typing import Optional, Tuple, List, Set, Dict, Iterable
 import time
 import itertools
 import aiosqlite
-import json, time 
+import json
 
 
 # =========================
@@ -42,7 +42,7 @@ async def init_db(db_path: Path):
             updated_at INTEGER NOT NULL
         )""")
 
-        # ---- Tournoi ----
+        # ---- Tournoi (user vs user) ----
         await db.execute("""
         CREATE TABLE IF NOT EXISTS tournaments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,11 +112,13 @@ async def init_db(db_path: Path):
             updated_at INTEGER NOT NULL
         )""")
 
-        # (Optionnel) index de perf si besoin de stats lourdes par session
         await db.execute("""
         CREATE INDEX IF NOT EXISTS idx_team_pairs_by_session
         ON team_pair_counts(session_id)
         """)
+
+        # ---- Historique des compositions (signatures fortes) ----
+        await _ensure_team_history_table(db)
 
         await db.commit()
 
@@ -127,7 +129,9 @@ async def init_db(db_path: Path):
 async def get_rating(db_path: Path, user_id: int) -> Optional[float]:
     async with aiosqlite.connect(db_path) as db:
         async with db.execute("SELECT rating FROM skills WHERE user_id=?", (str(user_id),)) as cur:
-            row = await cur.fetchone()
+            row = await cur.fetchone
+            if callable(row):  # safety in case of accidental await omission by lib
+                row = await row()
             return float(row[0]) if row else None
 
 
@@ -212,7 +216,7 @@ async def fetch_all_ratings_and_links(
 
 
 # =========================
-# Repos Tournoi
+# Repos Tournoi (user vs user)
 # =========================
 async def create_tournament(db_path: Path, guild_id: int, name: str, created_by: int) -> int:
     async with aiosqlite.connect(db_path) as db:
@@ -364,7 +368,7 @@ async def report_match_result(
 
 
 # =========================
-# Repos TeamRolls
+# Repos TeamRolls (paires)
 # =========================
 async def get_or_create_session_id(db_path: Path, guild_id: int, name: str) -> int:
     async with aiosqlite.connect(db_path) as db:
@@ -413,7 +417,6 @@ async def bump_pair_counts(db_path: Path, session_id: int, teams: Iterable[Itera
         return
 
     async with aiosqlite.connect(db_path) as db:
-        # upsert pour chaque paire
         for (a, b), inc in pairs.items():
             await db.execute("""
                 INSERT INTO team_pair_counts(session_id, user_a, user_b, count)
@@ -455,6 +458,7 @@ async def session_stats(db_path: Path, session_id: int, user_ids: Iterable[int])
             seen += 1
     return seen, len(all_pairs)
 
+
 async def set_team_last(db_path: Path, guild_id: int, snapshot: dict) -> None:
     payload = json.dumps(snapshot, ensure_ascii=False)
     async with aiosqlite.connect(db_path) as db:
@@ -466,6 +470,7 @@ async def set_team_last(db_path: Path, guild_id: int, snapshot: dict) -> None:
               updated_at=excluded.updated_at
         """, (str(guild_id), payload, int(time.time())))
         await db.commit()
+
 
 async def get_team_last(db_path: Path, guild_id: int) -> Optional[dict]:
     async with aiosqlite.connect(db_path) as db:
@@ -479,12 +484,14 @@ async def get_team_last(db_path: Path, guild_id: int) -> Optional[dict]:
                 return None
 
 
+# =========================
+# Utilitaire wiring matches (compat schémas)
+# =========================
 async def set_next_links(db_path, tournament_id, updates):
     """
     updates: list[(match_id, next_match_id, next_slot)]
     Met à jour next_match_id / next_slot sans recréer les matchs.
     """
-    import aiosqlite
     async with aiosqlite.connect(db_path) as db:
         # Détecte le bon nom de table utilisé par le schéma existant
         cur = await db.execute(
@@ -499,9 +506,11 @@ async def set_next_links(db_path, tournament_id, updates):
         await db.commit()
 
 
-# --- Historique compositions d'équipes (anti-répétition globale) ---
+# =========================
+# Historique compositions d'équipes (signatures fortes)
+# =========================
 
-async def _ensure_team_history_table(db):
+async def _ensure_team_history_table(db: aiosqlite.Connection):
     await db.execute("""
     CREATE TABLE IF NOT EXISTS team_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -518,7 +527,6 @@ async def _ensure_team_history_table(db):
 
 
 async def load_team_signatures(db_path: str, guild_id: int, session: str, players_fp: str, sizes_fp: str) -> set[str]:
-    import aiosqlite
     async with aiosqlite.connect(db_path) as db:
         await _ensure_team_history_table(db)
         cur = await db.execute("""
@@ -532,7 +540,6 @@ async def load_team_signatures(db_path: str, guild_id: int, session: str, player
 
 
 async def add_team_signature(db_path: str, guild_id: int, session: str, players_fp: str, sizes_fp: str, signature: str, created_at: int) -> bool:
-    import aiosqlite
     async with aiosqlite.connect(db_path) as db:
         await _ensure_team_history_table(db)
         try:
@@ -547,11 +554,39 @@ async def add_team_signature(db_path: str, guild_id: int, session: str, players_
             return False
 
 
+async def prune_team_signatures(db_path: str, guild_id: int, session: str, players_fp: str, sizes_fp: str, keep_last: int) -> int:
+    """
+    Ne conserve que les 'keep_last' dernières signatures (créées les plus récentes en premier)
+    pour (guild_id, session, players_fp, sizes_fp).
+    Retourne le nombre de lignes supprimées.
+    """
+    async with aiosqlite.connect(db_path) as db:
+        await _ensure_team_history_table(db)
+        cur = await db.execute("""
+            SELECT id
+            FROM team_history
+            WHERE guild_id=? AND session=? AND players_fp=? AND sizes_fp=?
+            ORDER BY created_at DESC, id DESC
+        """, (guild_id, session, players_fp, sizes_fp))
+        rows = await cur.fetchall()
+        await cur.close()
+        ids = [r[0] for r in rows]
+        if len(ids) <= keep_last:
+            return 0
+        to_delete = ids[keep_last:]
+        qmarks = ",".join("?" for _ in to_delete)
+        await db.execute(f"DELETE FROM team_history WHERE id IN ({qmarks})", to_delete)
+        await db.commit()
+        return len(to_delete)
+
+
 async def clear_team_signatures(db_path: str, guild_id: int, session: str, players_fp: str = "", sizes_fp: str = "") -> int:
     """
     Si 'session' est vide: on efface pour TOUTES les sessions mais UNIQUEMENT si players_fp & sizes_fp sont fournis.
+    Sinon, si session fournie:
+      - si players_fp & sizes_fp fournis: purge ciblée (set + tailles)
+      - sinon: purge toute la session
     """
-    import aiosqlite
     async with aiosqlite.connect(db_path) as db:
         await _ensure_team_history_table(db)
         if session and players_fp and sizes_fp:
@@ -575,4 +610,3 @@ async def clear_team_signatures(db_path: str, guild_id: int, session: str, playe
         n = cur.rowcount if cur.rowcount is not None else 0
         await db.commit()
         return n
-
