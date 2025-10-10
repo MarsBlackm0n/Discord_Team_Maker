@@ -781,57 +781,83 @@ async def arena_mark_results(db_path: str, arena_id: int, round_index: int,
 
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT * FROM arena WHERE id = ?", (int(arena_id),))
+
+        # 🔧 D'abord on tente dans la table moderne
+        cur = await db.execute("SELECT * FROM arena_tournaments WHERE id=?", (int(arena_id),))
         row = await cur.fetchone()
         await cur.close()
+
+        # 🧩 Si rien trouvé, on tente la table legacy
+        if not row:
+            cur = await db.execute("SELECT * FROM arena WHERE id=?", (int(arena_id),))
+            row = await cur.fetchone()
+            await cur.close()
+
         if not row:
             raise RuntimeError("Arena introuvable")
 
-        participants = [int(x) for x in _json_load(row["participants"], [])]
-        schedule = _json_load(row["schedule"], [])
-        scores = {int(k): int(v) for k, v in _json_load(row["scores"], {}).items()}
-        reported = _json_load(row.get("reported") if "reported" in row.keys() else row["reported"] if "reported" in row.keys() else "{}", {})  # compat
+        # --- Décodage JSON (compatibilité double schéma) ---
+        if "participants_json" in row.keys():
+            participants = json.loads(row["participants_json"])
+            schedule = json.loads(row["schedule_json"])
+            scores = {int(k): int(v) for k, v in json.loads(row["scores_json"]).items()}
+            reported = json.loads(row.get("reported_json") or "{}")
+        else:
+            participants = _json_load(row["participants"], [])
+            schedule = _json_load(row["schedule"], [])
+            scores = {int(k): int(v) for k, v in _json_load(row["scores"], {}).items()}
+            reported = _json_load(row.get("reported") or "{}", {})
+
         if not isinstance(reported, dict):
             reported = {}
 
-        # 1) update scores (addition)
+        # --- 1) MAJ des scores ---
         for uid, pts in (new_scores or {}).items():
             uid = int(uid)
             scores[uid] = int(scores.get(uid, 0)) + int(pts)
 
-        # 2) mark reported pairs for this round
+        # --- 2) Marquer les paires reportées ---
+        def _pair_key(a, b): return f"{min(a, b)}-{max(a, b)}"
         rkey = str(int(round_index))
         seen = set(reported.get(rkey, []))
         for (a, b) in (reported_pairs or []):
             seen.add(_pair_key(a, b))
         reported[rkey] = sorted(seen)
 
-        # 3) check completeness
+        # --- 3) Vérifie complétude ---
         cur_round = int(row["current_round"])
         rounds_total = int(row["rounds_total"])
         state = row["state"]
-
         this_pairs = schedule[cur_round - 1] if 1 <= cur_round <= len(schedule) else []
         needed = {_pair_key(p[0], p[1]) for p in this_pairs}
         have = set(reported.get(str(cur_round), []))
         complete = (needed and have.issuperset(needed))
 
         if complete:
-            cur_round += 1
-            if cur_round > rounds_total:
+            next_round = cur_round + 1
+            if next_round > rounds_total:
                 state = "finished"
-                cur_round = rounds_total  # clamp
             else:
                 state = "running"
+                cur_round = next_round
 
-        # 4) save
-        await db.execute(
-            "UPDATE arena SET scores=?, reported=?, current_round=?, state=? WHERE id=?",
-            (json.dumps(scores), json.dumps(reported), cur_round, state, int(arena_id))
-        )
+        # --- 4) Sauvegarde ---
+        if "participants_json" in row.keys():
+            await db.execute("""
+                UPDATE arena_tournaments
+                SET scores_json=?, reported_json=?, current_round=?, state=?
+                WHERE id=?
+            """, (json.dumps(scores), json.dumps(reported), cur_round, state, int(arena_id)))
+        else:
+            await db.execute("""
+                UPDATE arena
+                SET scores=?, reported=?, current_round=?, state=?
+                WHERE id=?
+            """, (json.dumps(scores), json.dumps(reported), cur_round, state, int(arena_id)))
+
         await db.commit()
 
-        # 5) retourner l'arena mise à jour (comme attendu par le cog)
+        # --- 5) Retour ---
         return {
             "id": int(arena_id),
             "participants": participants,
