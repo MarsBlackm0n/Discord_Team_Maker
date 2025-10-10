@@ -6,7 +6,7 @@ import random
 import discord
 from discord import app_commands
 from discord.ext import commands
-
+from pathlib import Path
 from ..team_logic import parse_mentions
 from ..voice import create_and_move_voice  # ← voix centralisée (crée/réutilise, lobby, pin on top)
 from ..db import (
