@@ -435,76 +435,75 @@ class ArenaCog(commands.Cog):
         await channel.send(embed=emb)
 
 
-MAX_BYTES = 7_500_000  # ~7.5 MB pour rester sous la limite standard (~8MB)
+    async def _post_podium_embed(self, channel: discord.abc.Messageable, participants: list[int],
+                                scores: dict[str, int]):
+        MAX_BYTES = 7_500_000  # ~7.5 MB pour rester sous la limite standard (~8MB)
+        norm = {int(k): int(v) for k, v in (scores or {}).items()}
+        rows = sorted([(uid, norm.get(uid, 0)) for uid in participants], key=lambda x: (-x[1], x[0]))
 
-async def _post_podium_embed(self, channel: discord.abc.Messageable, participants: list[int],
-                             scores: dict[str, int]):
-    norm = {int(k): int(v) for k, v in (scores or {}).items()}
-    rows = sorted([(uid, norm.get(uid, 0)) for uid in participants], key=lambda x: (-x[1], x[0]))
+        emb = discord.Embed(title="🏆 Arena — Podium", color=discord.Color.brand_green())
 
-    emb = discord.Embed(title="🏆 Arena — Podium", color=discord.Color.brand_green())
+        # Podium
+        medals = ["🥇", "🥈", "🥉"]
+        for i in range(min(3, len(rows))):
+            uid, pts = rows[i]
+            emb.add_field(name=medals[i], value=f"<@{uid}> — **{pts}** pts", inline=False)
 
-    # Podium
-    medals = ["🥇", "🥈", "🥉"]
-    for i in range(min(3, len(rows))):
-        uid, pts = rows[i]
-        emb.add_field(name=medals[i], value=f"<@{uid}> — **{pts}** pts", inline=False)
+        enable_trash_talk = getattr(self.bot.settings, "ENABLE_TRASH_TALK", True)
+        file_to_send: discord.File | None = None
 
-    enable_trash_talk = getattr(self.bot.settings, "ENABLE_TRASH_TALK", True)
-    file_to_send: discord.File | None = None
+        if enable_trash_talk and len(rows) >= 2:
+            loser_uid, loser_pts = rows[-1]
+            jokes = [
+                "A mon avis, tu devrais poser cette Goudale et te servir un verre d'eau.",
+                "Chez LRM, on ne laisse personne derrière… sauf toi.",
+                "Oui on sait, c'est parce que les champions en face étaient broken",
+                "La VAR est formelle, t'as bien perdu.",
+                "Tu devrais aller jouer à Minecraft.",
+                "Faut se rendre à l'évidence, t'es trop vieux pour ces conneries.",
+            ]
+            emb.add_field(
+                name="🖕 Loser Award",
+                value=f"**<@{loser_uid}>** — {loser_pts} pts\n*{random.choice(jokes)}*",
+                inline=False,
+            )
 
-    if enable_trash_talk and len(rows) >= 2:
-        loser_uid, loser_pts = rows[-1]
-        jokes = [
-            "A mon avis, tu devrais poser cette Goudale et te servir un verre d'eau.",
-            "Chez LRM, on ne laisse personne derrière… sauf toi.",
-            "Oui on sait, c'est parce que les champions en face étaient broken",
-            "La VAR est formelle, t'as bien perdu.",
-            "Tu devrais aller jouer à Minecraft.",
-            "Faut se rendre à l'évidence, t'es trop vieux pour ces conneries.",
-        ]
-        emb.add_field(
-            name="🖕 Loser Award",
-            value=f"**<@{loser_uid}>** — {loser_pts} pts\n*{random.choice(jokes)}*",
-            inline=False,
-        )
+            # 🔽 Cherche un fichier image/gif local raisonnable
+            try:
+                assets_dir = Path(__file__).parents[1] / "assets" / "arena_gifs"
+                candidates = []
+                if assets_dir.exists():
+                    for p in assets_dir.iterdir():
+                        if p.is_file() and p.suffix.lower() in {".gif", ".png", ".jpg", ".jpeg", ".webp"}:
+                            try:
+                                size = p.stat().st_size
+                            except Exception:
+                                size = 0
+                            if 0 < size <= MAX_BYTES:
+                                candidates.append((p, size))
+                # Choisit un au hasard parmi ceux qui passent la taille
+                if candidates:
+                    fp, size = random.choice(candidates)
+                    # Important: le filename doit matcher l’URL attachment://
+                    emb.set_image(url=f"attachment://{fp.name}")
+                    file_to_send = discord.File(fp.open("rb"), filename=fp.name)
+                else:
+                    # (Optionnel) log léger pour debug
+                    print("[arena podium] Aucun GIF/image éligible (taille/extension) dans", assets_dir)
+            except Exception as e:
+                print("[arena podium] Erreur sélection GIF:", e)
+                file_to_send = None  # on enverra sans image
 
-        # 🔽 Cherche un fichier image/gif local raisonnable
+        # Envoi
         try:
-            assets_dir = Path(__file__).parents[1] / "assets" / "arena_gifs"
-            candidates = []
-            if assets_dir.exists():
-                for p in assets_dir.iterdir():
-                    if p.is_file() and p.suffix.lower() in {".gif", ".png", ".jpg", ".jpeg", ".webp"}:
-                        try:
-                            size = p.stat().st_size
-                        except Exception:
-                            size = 0
-                        if 0 < size <= MAX_BYTES:
-                            candidates.append((p, size))
-            # Choisit un au hasard parmi ceux qui passent la taille
-            if candidates:
-                fp, size = random.choice(candidates)
-                # Important: le filename doit matcher l’URL attachment://
-                emb.set_image(url=f"attachment://{fp.name}")
-                file_to_send = discord.File(fp.open("rb"), filename=fp.name)
+            if file_to_send:
+                await channel.send(embed=emb, file=file_to_send)
             else:
-                # (Optionnel) log léger pour debug
-                print("[arena podium] Aucun GIF/image éligible (taille/extension) dans", assets_dir)
+                await channel.send(embed=emb)
         except Exception as e:
-            print("[arena podium] Erreur sélection GIF:", e)
-            file_to_send = None  # on enverra sans image
-
-    # Envoi
-    try:
-        if file_to_send:
-            await channel.send(embed=emb, file=file_to_send)
-        else:
+            print("[arena podium] Envoi message avec image échoué:", e)
+            # Dernier fallback: envoyer l’embed sans image
             await channel.send(embed=emb)
-    except Exception as e:
-        print("[arena podium] Envoi message avec image échoué:", e)
-        # Dernier fallback: envoyer l’embed sans image
-        await channel.send(embed=emb)
 
 
 async def setup(bot: commands.Bot):
