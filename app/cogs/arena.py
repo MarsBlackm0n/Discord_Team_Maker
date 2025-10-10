@@ -2,7 +2,7 @@
 from __future__ import annotations
 from typing import List, Dict, Optional
 from datetime import datetime
-
+import random
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -436,16 +436,53 @@ class ArenaCog(commands.Cog):
 
     async def _post_podium_embed(self, channel: discord.abc.Messageable, participants: List[int],
                                  scores: Dict[str, int]):
+        # Tri des scores (desc) puis uid
         norm = {int(k): int(v) for k, v in (scores or {}).items()}
         rows = sorted([(uid, norm.get(uid, 0)) for uid in participants], key=lambda x: (-x[1], x[0]))
+
         emb = discord.Embed(title="🏆 Arena — Podium", color=discord.Color.brand_green())
+
+        # Podium
         medals = ["🥇", "🥈", "🥉"]
         for i in range(min(3, len(rows))):
             uid, pts = rows[i]
             emb.add_field(name=medals[i], value=f"<@{uid}> — **{pts}** pts", inline=False)
+
+        # 🖕 Prix du dernier (optionnel)
+        enable_trash_talk = getattr(self.bot.settings, "ENABLE_TRASH_TALK", True)  # ajoute ce bool dans tes settings si tu veux
+        if enable_trash_talk and len(rows) >= 2:
+            loser_uid, loser_pts = rows[-1]
+
+            # Quelques punchlines légères (ajoute/retire ce que tu veux)
+            jokes = [
+                "On t’aime quand même. Mais de loin. Très loin.",
+                "Merci d’avoir participé… et d’avoir boosté l’ego des autres 😘",
+                "Toujours viser les étoiles… même si tu finis au sol.",
+                "Statistiquement, il fallait bien un dernier.",
+                "La prochaine, tu carries (peut-être).",
+            ]
+            # Choisis un GIF/image fun (ou mets None pour désactiver l’image)
+            gifs = [
+                # Remplace par tes propres liens (CDN perso conseillé). Tenor/Giphy peuvent bloquer l’embed parfois.
+                "https://media.tenor.com/PLZ1S0y0VagAAAAC/sad-cat.gif",
+                "https://media.tenor.com/3yYl7sY3pDkAAAAC/crying-jordan-tears.gif",
+                "https://media.tenor.com/6e-0WcD_8MIAAAAC/bonk.gif",
+            ]
+
+            emb.add_field(
+                name="🖕 Loser Award",
+                value=f"**<@{loser_uid}>** — {loser_pts} pts\n*{random.choice(jokes)}*",
+                inline=False
+            )
+
+            # Image/ GIF (facultatif)
+            try:
+                emb.set_image(url=random.choice(gifs))
+            except Exception:
+                pass
+
         await channel.send(embed=emb)
-
-
+        
 async def setup(bot: commands.Bot):
     cog = ArenaCog(bot)
     await bot.add_cog(cog)
