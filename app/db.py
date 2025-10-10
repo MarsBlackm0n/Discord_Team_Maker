@@ -130,8 +130,6 @@ async def get_rating(db_path: Path, user_id: int) -> Optional[float]:
     async with aiosqlite.connect(db_path) as db:
         async with db.execute("SELECT rating FROM skills WHERE user_id=?", (str(user_id),)) as cur:
             row = await cur.fetchone()
-            if callable(row):  # safety in case of accidental await omission by lib
-                row = await row()
             return float(row[0]) if row else None
 
 
