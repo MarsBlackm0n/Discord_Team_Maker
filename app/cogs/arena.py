@@ -434,54 +434,57 @@ class ArenaCog(commands.Cog):
         emb.description = "\n".join(desc) or "_(personne)_"
         await channel.send(embed=emb)
 
-    async def _post_podium_embed(self, channel: discord.abc.Messageable, participants: List[int],
-                                 scores: Dict[str, int]):
-        # Tri des scores (desc) puis uid
+    async def _post_podium_embed(self, channel: discord.abc.Messageable, participants: list[int],
+                                scores: dict[str, int]):
+        # Classement
         norm = {int(k): int(v) for k, v in (scores or {}).items()}
         rows = sorted([(uid, norm.get(uid, 0)) for uid in participants], key=lambda x: (-x[1], x[0]))
 
         emb = discord.Embed(title="🏆 Arena — Podium", color=discord.Color.brand_green())
 
-        # Podium
+        # Podium 🥇🥈🥉
         medals = ["🥇", "🥈", "🥉"]
         for i in range(min(3, len(rows))):
             uid, pts = rows[i]
             emb.add_field(name=medals[i], value=f"<@{uid}> — **{pts}** pts", inline=False)
 
-        # 🖕 Prix du dernier (optionnel)
-        enable_trash_talk = getattr(self.bot.settings, "ENABLE_TRASH_TALK", True)  # ajoute ce bool dans tes settings si tu veux
+        # Loser Award (si activé)
+        enable_trash_talk = getattr(self.bot.settings, "ENABLE_TRASH_TALK", True)
+        file_to_send: discord.File | None = None
+
         if enable_trash_talk and len(rows) >= 2:
             loser_uid, loser_pts = rows[-1]
-
-            # Quelques punchlines légères (ajoute/retire ce que tu veux)
             jokes = [
-                "On t’aime quand même. Mais de loin. Très loin.",
-                "Merci d’avoir participé… et d’avoir boosté l’ego des autres 😘",
-                "Toujours viser les étoiles… même si tu finis au sol.",
-                "Statistiquement, il fallait bien un dernier.",
-                "La prochaine, tu carries (peut-être).",
+                "A mon avis, tu devrais poser cette Goudale et te servir un verre d'eau.",
+                "Chez LRM, on ne laisse personne derrière… sauf toi.",
+                "Oui on sait, c'est parce que les champions en face étaient broken",
+                "La VAR est formelle, t'as bien perdu.",
+                "Tu devrais aller jouer à Minecraft.",
+                "Faut se rendre à l'évidence, t'es trop vieux pour ces conneries.",
             ]
-            # Choisis un GIF/image fun (ou mets None pour désactiver l’image)
-            gifs = [
-                # Remplace par tes propres liens (CDN perso conseillé). Tenor/Giphy peuvent bloquer l’embed parfois.
-                "https://media.tenor.com/PLZ1S0y0VagAAAAC/sad-cat.gif",
-                "https://media.tenor.com/3yYl7sY3pDkAAAAC/crying-jordan-tears.gif",
-                "https://media.tenor.com/6e-0WcD_8MIAAAAC/bonk.gif",
-            ]
-
             emb.add_field(
                 name="🖕 Loser Award",
                 value=f"**<@{loser_uid}>** — {loser_pts} pts\n*{random.choice(jokes)}*",
-                inline=False
+                inline=False,
             )
 
-            # Image/ GIF (facultatif)
+            # 🔽 Joindre un GIF local si dispo
             try:
-                emb.set_image(url=random.choice(gifs))
+                assets_dir = Path(__file__).parents[1] / "assets" / "arena_gifs"
+                candidates = [p for p in assets_dir.iterdir()
+                            if p.is_file() and p.suffix.lower() in {".gif", ".png", ".jpg", ".jpeg", ".webp"}]
+                if candidates:
+                    fp = random.choice(candidates)
+                    emb.set_image(url=f"attachment://{fp.name}")   # important: attachment://FILENAME
+                    file_to_send = discord.File(str(fp), filename=fp.name)
             except Exception:
-                pass
+                file_to_send = None  # en cas de souci, on envoie sans image
 
-        await channel.send(embed=emb)
+        # Envoi (avec ou sans fichier)
+        if file_to_send:
+            await channel.send(embed=emb, file=file_to_send)
+        else:
+            await channel.send(embed=emb)
         
 async def setup(bot: commands.Bot):
     cog = ArenaCog(bot)
