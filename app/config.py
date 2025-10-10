@@ -4,6 +4,12 @@ from pathlib import Path
 import os
 from dotenv import load_dotenv
 
+def _str2bool(x: str | None, default: bool = True) -> bool:
+    if x is None:
+        return default
+    x = x.strip().lower()
+    return x in {"1", "true", "t", "yes", "y", "on"}
+
 @dataclass(frozen=True)
 class Settings:
     DISCORD_BOT_TOKEN: str
@@ -12,10 +18,12 @@ class Settings:
     RESTART_MODE: str
     DB_PATH: Path
     RIOT_API_KEY: str | None
-    ENABLE_TRASH_TALK: bool 
+    ENABLE_TRASH_TALK: bool  # nouveau flag
 
 def load_settings() -> Settings:
-    load_dotenv(dotenv_path=Path(__file__).with_name(".env"))  # en local ; ignoré en prod si variables déjà présentes
+    # Charge .env à côté de ce fichier (si présent)
+    load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
+
     token = os.getenv("DISCORD_BOT_TOKEN")
     if not token:
         raise RuntimeError("DISCORD_BOT_TOKEN manquant")
