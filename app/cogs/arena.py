@@ -65,91 +65,140 @@ class ArenaCog(commands.Cog):
     # UI: Bouton “Reporter” + Modal
     # ======================================================================
     class ReportModal(discord.ui.Modal, title="Reporter le round"):
-        """Modal avec 3–4 champs courts ; accepte '#1:2' ou '@A @B:6'."""
-        def __init__(self, cog: "ArenaCog", *, guild: discord.Guild, round_pairs: list[list[int]], prefills: list[str]):
+        """
+        Modal paginé : on ne saisit que le TOP (1..8) pour une tranche de duos.
+        - round_pairs_page: liste de duos pour CETTE page (ex: 5 duos max)
+        - start_index: index global du 1er duo affiché (1-based)
+        """
+        def __init__(
+            self,
+            cog: "ArenaCog",
+            *,
+            guild: discord.Guild,
+            round_pairs_page: list[list[int]],
+            start_index: int,
+        ):
             super().__init__(timeout=180)
             self.cog = cog
             self.guild = guild
-            self.round_pairs = round_pairs
+            self.round_pairs_page = round_pairs_page
+            self.start_index = int(start_index)
             self.inputs: list[discord.ui.TextInput] = []
 
-            max_fields = min(4, len(round_pairs))
-            for i in range(max_fields):
-                u1, u2 = round_pairs[i]
+            # 5 champs max par modal (Discord)
+            for i, pair in enumerate(round_pairs_page, start=0):
+                u1, u2 = pair
                 m1 = guild.get_member(u1) if guild else None
                 m2 = guild.get_member(u2) if guild else None
-                label = f"Duo {i+1}: {(m1.display_name if m1 else u1)} & {(m2.display_name if m2 else u2)}"
+                duo_label = f"Duo {self.start_index + i}: {(m1.display_name if m1 else u1)} & {(m2.display_name if m2 else u2)}"
+
                 ti = discord.ui.TextInput(
-                    label=label[:45],
-                    placeholder=f"ex: #{i+1}:1   ou   @A @B:6",
-                    default=prefills[i] if i < len(prefills) else "",
+                    label=duo_label[:45],          # affichage non éditable (dans le label)
+                    placeholder="Top (1..8)",      # on saisit juste le rang
                     required=False,
-                    max_length=100,
+                    max_length=2,
                     style=discord.TextStyle.short,
+                    custom_id=f"duo_{self.start_index + i}"
                 )
                 self.inputs.append(ti)
                 self.add_item(ti)
 
         async def on_submit(self, interaction: discord.Interaction):
-            chunks = [i.value.strip() for i in self.inputs if i.value and i.value.strip()]
+            # Recompose "#<index global>:<rank>" pour les champs non vides
+            chunks = []
+            for i, field in enumerate(self.inputs, start=0):
+                v = (field.value or "").strip()
+                if not v:
+                    continue
+                global_index = self.start_index + i
+                chunks.append(f"#{global_index}:{v}")
+
             joined = " | ".join(chunks)
             if not joined:
-                await interaction.response.send_message("ℹ️ Rien à reporter.", ephemeral=True)
+                await interaction.response.send_message("ℹ️ Aucun top renseigné.", ephemeral=True)
                 return
+
             await interaction.response.defer(ephemeral=True, thinking=True)
             await self.cog._process_report(interaction, joined)
 
+
     class ReportView(discord.ui.View):
-        """View avec bouton “Reporter” + “Move” (déplacement vocal via voice.py)."""
+        """View avec boutons 'Reporter …' par pages de 5 duos, + bouton Move."""
         def __init__(self, cog: "ArenaCog", *, guild: discord.Guild, round_pairs: list[list[int]]):
             super().__init__(timeout=None)
             self.cog = cog
             self.guild = guild
             self.round_pairs = round_pairs
 
-        @discord.ui.button(label="Reporter", emoji="📝", style=discord.ButtonStyle.primary, custom_id="arena_report_button")
-        async def open_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
-            prefills = [f"#{i+1}:" for i in range(min(4, len(self.round_pairs)))]
-            modal = ArenaCog.ReportModal(self.cog, guild=self.guild, round_pairs=self.round_pairs, prefills=prefills)
-            await interaction.response.send_modal(modal)
+            # --- Boutons Reporter paginés (5 duos max par modal) ---
+            n = len(round_pairs)
+            if n <= 5:
+                # un seul bouton
+                btn = discord.ui.Button(
+                    label="Reporter",
+                    emoji="📝",
+                    style=discord.ButtonStyle.primary,
+                    custom_id="arena_report_1"
+                )
 
+                async def cb(interaction: discord.Interaction, _start=1, _end=n):
+                    page = round_pairs[_start-1:_end]
+                    modal = ArenaCog.ReportModal(
+                        self.cog, guild=self.guild,
+                        round_pairs_page=page, start_index=_start
+                    )
+                    await interaction.response.send_modal(modal)
+
+                btn.callback = cb
+                self.add_item(btn)
+            else:
+                # plusieurs boutons: 1–5, 6–10, ...
+                for start in range(1, n + 1, 5):
+                    end = min(start + 5 - 1, n)
+                    btn = discord.ui.Button(
+                        label=f"Reporter {start}–{end}",
+                        emoji="📝",
+                        style=discord.ButtonStyle.primary,
+                        custom_id=f"arena_report_{start}"
+                    )
+
+                    async def cb(interaction: discord.Interaction, _start=start, _end=end):
+                        page = round_pairs[_start-1:_end]
+                        modal = ArenaCog.ReportModal(
+                            self.cog, guild=self.guild,
+                            round_pairs_page=page, start_index=_start
+                        )
+                        await interaction.response.send_modal(modal)
+
+                    btn.callback = cb
+                    self.add_item(btn)
+
+        # --- Bouton Move ---
         @discord.ui.button(label="Move", emoji="🚚", style=discord.ButtonStyle.secondary, custom_id="arena_move_button")
         async def move_round(self, interaction: discord.Interaction, button: discord.ui.Button):
             await interaction.response.defer(ephemeral=True, thinking=True)
-
             guild = interaction.guild
             pairs = self.round_pairs or []
             if not guild or not pairs:
                 await interaction.followup.send("❌ Impossible de récupérer les duos du round.", ephemeral=True)
                 return
-
-            # Recompose les équipes (duos) du round
             teams = []
             for (u1, u2) in pairs:
                 m1 = guild.get_member(int(u1))
                 m2 = guild.get_member(int(u2))
                 team = [m for m in (m1, m2) if m and not m.bot]
                 teams.append(team)
-
             sizes = [len(t) for t in teams]
-
-            # Déplacement via voice.py (crée/réutilise, lobby, pin on top)
             try:
                 await create_and_move_voice(
-                    interaction,
-                    teams,
-                    sizes,
-                    ttl_minutes=90,           # ajuste si besoin
-                    reuse_existing=True,
-                    base_name="Team",         # ou "Duo" si tu préfères nommer "Duo 1..K"
-                    create_lobby=True,
-                    lobby_name="Lobby Tournoi",
+                    interaction, teams, sizes,
+                    ttl_minutes=90, reuse_existing=True,
+                    base_name="Team", create_lobby=True, lobby_name="Lobby Tournoi",
                     pin_on_top=True,
                 )
             except discord.Forbidden:
                 await interaction.followup.send("⚠️ Permissions manquantes (Manage Channels / Move Members).", ephemeral=True)
                 return
-
             await interaction.followup.send("✅ Équipes déplacées vers les salons vocaux.", ephemeral=True)
 
     # ======================================================================
