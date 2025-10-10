@@ -99,7 +99,7 @@ class RatingsCog(commands.Cog):
         desc = "\n".join(lines) if lines else "_(aucune entrée)_"
         embed = discord.Embed(title=title, description=desc, color=discord.Color.green())
         embed.set_footer(text=" • ".join([f"{len(filtered)}/{total} affichés", f"Tri: {sort_val.replace('_',' ')}", f"Portée: {'vocal' if use_vocal else 'serveur'}"]))
-        await inter.followup.send(embed=embed, ephemeral=True)
+        await inter.followup.send(embed=embed, ephemeral=False)
 
     @app_commands.command(name="linklol", description="Lier un compte LoL + import du rang si clé Riot.")
     @app_commands.describe(user="Membre", summoner="Pseudo LoL exact", region="EUW/EUNE/NA/KR/BR/JP/LAN/LAS/OCE/TR/RU")
