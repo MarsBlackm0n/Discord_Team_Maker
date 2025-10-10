@@ -11,11 +11,7 @@ from discord.ext import commands
 
 from ..db import (
     get_rating, set_rating, set_team_last, get_team_last,
-    get_or_create_session_id, load_pair_counts, bump_pair_counts, session_stats, end_session
-)
-# ⬇️ on sépare l’historique “signatures fortes” dans un module dédié pour éviter
-#    de te faire éditer un gros db.py : il suffit d’ajouter le fichier joint.
-from ..db_team_history import (
+    get_or_create_session_id, load_pair_counts, bump_pair_counts, session_stats, end_session,
     load_team_signatures, add_team_signature, clear_team_signatures, prune_team_signatures
 )
 
