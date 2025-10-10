@@ -12,7 +12,7 @@ from ..voice import create_and_move_voice  # ← voix centralisée (crée/réuti
 from ..db import (
     get_team_last, set_team_last,
     arena_get_active, arena_create, arena_update_scores_and_advance,
-    arena_get_by_id, arena_set_state, arena_mark_results
+    arena_get_by_id, arena_set_state, arena_mark_results, ensure_arena_schema
 )
 
 def is_admin_or_owner(bot: commands.Bot, inter: discord.Interaction) -> bool:
@@ -588,6 +588,7 @@ class ArenaCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     cog = ArenaCog(bot)
+    await ensure_arena_schema(bot.settings.DB_PATH)
     await bot.add_cog(cog)
     # Pour rendre la view persistante après reboot, il faudrait une ReportView tolérante à guild=None/round_pairs=[],
     # puis enregistrer ici une instance "globale" :

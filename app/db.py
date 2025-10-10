@@ -122,6 +122,45 @@ async def init_db(db_path: Path):
 
         await db.commit()
 
+# --- helpers JSON sûrs (si pas déjà dans ton fichier)
+def _json_dump(x) -> str:
+    return json.dumps(x, separators=(",", ":"), ensure_ascii=False)
+
+def _json_load(s, default):
+    try:
+        return json.loads(s) if isinstance(s, (str, bytes, bytearray)) else (s or default)
+    except Exception:
+        return default
+
+async def ensure_arena_schema(db_path: str) -> None:
+    """Crée la table arena si manquante et ajoute la colonne 'reported' si absente."""
+    async with aiosqlite.connect(db_path) as db:
+        # 1) Table principale
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS arena (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            creator_id INTEGER NOT NULL,
+            state TEXT NOT NULL,                 -- 'setup' | 'running' | 'finished' | 'cancelled'
+            participants TEXT NOT NULL,          -- JSON list[int]
+            schedule TEXT NOT NULL,              -- JSON list[list[[u1,u2],...]] par round
+            scores TEXT NOT NULL,                -- JSON dict[str->int]
+            current_round INTEGER NOT NULL,      -- 1-based
+            rounds_total INTEGER NOT NULL,
+            reported TEXT NOT NULL DEFAULT '{}', -- JSON dict[str(round)-> list['u1-u2']]
+            created_at INTEGER NOT NULL
+        );
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_arena_guild ON arena(guild_id);")
+
+        # 2) Migration légère : colonne 'reported' si elle n'existe pas
+        cur = await db.execute("PRAGMA table_info(arena);")
+        cols = [r[1] for r in await cur.fetchall()]
+        if "reported" not in cols:
+            await db.execute("ALTER TABLE arena ADD COLUMN reported TEXT NOT NULL DEFAULT '{}';")
+
+        await db.commit()
+
 
 # =========================
 # Repos Skills
@@ -724,12 +763,6 @@ async def arena_set_state(db_path: str, arena_id: int, new_state: str):
         await db.commit()
 
 
-# Utilitaires JSON
-def _json_load(s, default):
-    try:
-        return json.loads(s) if isinstance(s, (str, bytes, bytearray)) else (s or default)
-    except Exception:
-        return default
 
 def _pair_key(a: int, b: int) -> str:
     x, y = sorted((int(a), int(b)))
