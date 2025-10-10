@@ -772,10 +772,10 @@ async def arena_mark_results(db_path: str, arena_id: int, round_index: int,
                              new_scores: Dict[int, int],
                              reported_pairs: List[Tuple[int, int]]) -> Dict:
     """
-    - Ajoute `new_scores` aux scores existants
+    - Ajoute `new_scores` aux scores
     - Marque les `reported_pairs` pour le round `round_index`
-    - Avance au round suivant si le round courant est complet
-    - Retourne l'arena mise à jour
+    - Avance si le round courant est complet
+    - Migration à la volée: ajoute reported_json à arena_tournaments si absente
     """
     import aiosqlite, json
 
@@ -785,6 +785,22 @@ async def arena_mark_results(db_path: str, arena_id: int, round_index: int,
 
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
+
+        # --- MIGRATION à la volée : s'assurer que reported_json existe
+        # (ne casse rien si la colonne est déjà là)
+        try:
+            cur = await db.execute("PRAGMA table_info(arena_tournaments);")
+            cols = [r[1] for r in await cur.fetchall()]
+            await cur.close()
+            if "reported_json" not in cols:
+                await db.execute(
+                    "ALTER TABLE arena_tournaments "
+                    "ADD COLUMN reported_json TEXT NOT NULL DEFAULT '{}';"
+                )
+                await db.commit()
+        except Exception:
+            # On ignore silencieusement : si la table n'existe pas encore, on tombera sur la table legacy plus bas
+            pass
 
         # 1) On tente la table moderne
         cur = await db.execute("SELECT * FROM arena_tournaments WHERE id=?", (int(arena_id),))
@@ -802,11 +818,10 @@ async def arena_mark_results(db_path: str, arena_id: int, round_index: int,
         if not row:
             raise RuntimeError("Arena introuvable")
 
-        # --- Convertit la row en dict pour pouvoir faire .get() proprement
-        keys = row.keys()
-        rec = {k: row[k] for k in keys}
+        # --- Convertir en dict pour .get()
+        rec = {k: row[k] for k in row.keys()}
 
-        # --- Décodage JSON compatible double schéma
+        # --- Décodage JSON double schéma
         if "participants_json" in rec:  # nouveau schéma
             participants = json.loads(rec["participants_json"]) if rec.get("participants_json") else []
             schedule = json.loads(rec["schedule_json"]) if rec.get("schedule_json") else []
@@ -826,12 +841,12 @@ async def arena_mark_results(db_path: str, arena_id: int, round_index: int,
         if not isinstance(reported, dict):
             reported = {}
 
-        # --- 1) MAJ des scores
+        # --- 1) MAJ scores
         for uid, pts in (new_scores or {}).items():
             uid = int(uid)
             scores[uid] = int(scores.get(uid, 0)) + int(pts)
 
-        # --- 2) Marquage des paires reportées pour round_index
+        # --- 2) Marquer les paires reportées
         rkey = str(int(round_index))
         seen = set(reported.get(rkey, []))
         for (a, b) in (reported_pairs or []):
