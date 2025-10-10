@@ -61,43 +61,53 @@ async def _cleanup_loop(guild: discord.Guild):
         _CLEANUP_RUNNING[guild.id] = False
 
 
-async def _find_existing_team_channels(guild: discord.Guild, k: int) -> List[Optional[discord.VoiceChannel]]:
-    """Retourne une liste de longueur k, avec VoiceChannel si trouvé ('Team i') sinon None. Insensible à la casse."""
-    by_name = {vc.name.lower(): vc for vc in guild.voice_channels}
+def _match_team_name(name: str, base_name: str) -> bool:
+    return name.lower().startswith(base_name.lower() + " ")
+
+
+async def _find_existing_team_channels(
+    guild: discord.Guild,
+    k: int,
+    *,
+    base_name: str = "Team",
+    category: Optional[discord.CategoryChannel] = None,
+) -> List[Optional[discord.VoiceChannel]]:
+    """
+    Retourne une liste de longueur k :
+    - à l'index i (0-based) -> VoiceChannel "base_name {i+1}" si trouvé dans la (catégorie filtrée si donnée), sinon None.
+    """
+    by_name: Dict[str, discord.VoiceChannel] = {}
+    for vc in guild.voice_channels:
+        if category and vc.category_id != category.id:
+            continue
+        if _match_team_name(vc.name, base_name):
+            by_name[vc.name.lower()] = vc
+
     out: List[Optional[discord.VoiceChannel]] = []
     for i in range(1, k + 1):
-        out.append(by_name.get(f"team {i}"))
+        out.append(by_name.get(f"{base_name.lower()} {i}"))
     return out
 
-async def _ensure_lobby_and_pin_top(self, inter: discord.Interaction, *, base_name: str = "Team", lobby_name: str = "Lobby Tournoi"):
-    """Crée un salon 'Lobby Tournoi' si absent et remonte Lobby + Team 1..K en haut de la catégorie."""
-    guild = inter.guild
-    if not guild:
+
+async def _ensure_lobby_and_pin_top(
+    guild: discord.Guild,
+    *,
+    parent: Optional[discord.CategoryChannel],
+    base_name: str = "Team",
+    lobby_name: str = "Lobby Tournoi",
+    ttl_minutes: int = 90,
+):
+    """
+    Crée un salon 'Lobby Tournoi' si absent et remonte Lobby + base_name 1..K en haut de la catégorie.
+    Détermine l'ordre : Lobby (0), puis Team 1..K (par numéro).
+    """
+    import time as _time
+
+    if not parent:
         return
 
-    # Catégorie cible : celle du vocal de l'utilisateur si dispo, sinon la catégorie du 1er salon Team courant
-    parent = None
-    if isinstance(inter.user, discord.Member) and inter.user.voice and inter.user.voice.channel:
-        parent = inter.user.voice.channel.category
-
-    def _is_team(ch: discord.VoiceChannel) -> bool:
-        return ch and ch.name.lower().startswith(base_name.lower() + " ")
-
-    # collecte des salons Team existants
-    team_channels: list[discord.VoiceChannel] = []
-    for ch in guild.voice_channels:
-        if _is_team(ch):
-            if parent is None:
-                parent = ch.category
-            if ch.category == parent:
-                team_channels.append(ch)
-
-    if parent is None:
-        # pas de contexte clair : on s'arrête proprement
-        return
-
-    # Lobby : chercher dans la même catégorie
-    lobby = None
+    # Créer/trouver le lobby dans cette catégorie
+    lobby: Optional[discord.VoiceChannel] = None
     for ch in parent.voice_channels:
         if ch.name.lower() == lobby_name.lower():
             lobby = ch
@@ -111,24 +121,35 @@ async def _ensure_lobby_and_pin_top(self, inter: discord.Interaction, *, base_na
                 category=parent,
                 reason="Arena lobby",
             )
-            # trace pour /disbandteams si tu utilises TEMP_CHANNELS
-            TEMP_CHANNELS.setdefault(guild.id, []).append(lobby.id)
+            # suivi TTL (dict de dicts)
+            TEMP_CHANNELS.setdefault(guild.id, {})[lobby.id] = int(_time.time()) + ttl_minutes * 60
         except discord.Forbidden:
-            pass  # pas bloquant
+            lobby = None  # pas bloquant
 
-    # Remonter Lobby puis Teams : position 0 = tout en haut
-    try:
-        if lobby:
-            await lobby.edit(position=0, reason="Pin lobby on top")
-    except discord.Forbidden:
-        pass
-
-    # Remonte les Team 1..K dans l'ordre
-    # (Discord réindexe à chaque edit, donc on fait des edits successifs vers le haut)
-    for ch in sorted(team_channels, key=lambda c: c.position):
+    # Récupérer tous les channels "base_name i" de la catégorie
+    def team_index(ch: discord.VoiceChannel) -> int:
+        parts = ch.name.split()
         try:
-            await ch.edit(position=0, reason="Pin teams on top")
+            return int(parts[-1]) if _match_team_name(ch.name, base_name) else 9999
+        except Exception:
+            return 9999
+
+    team_channels = [vc for vc in parent.voice_channels if _match_team_name(vc.name, base_name)]
+    team_channels.sort(key=team_index)
+
+    # Ordre voulu : Lobby (0) puis Team 1..K (1..K)
+    ordered: List[discord.VoiceChannel] = []
+    if lobby:
+        ordered.append(lobby)
+    ordered.extend(team_channels)
+
+    # Repositionner en haut
+    for pos, ch in enumerate(ordered):
+        try:
+            await ch.edit(position=pos, reason="Pin lobby/teams on top")
         except discord.Forbidden:
+            pass
+        except discord.HTTPException:
             pass
 
 
@@ -138,48 +159,57 @@ async def create_and_move_voice(
     sizes: List[int],
     *,
     ttl_minutes: int = 90,
+    reuse_existing: bool = True,
+    base_name: str = "Team",
+    create_lobby: bool = True,
+    lobby_name: str = "Lobby Tournoi",
+    pin_on_top: bool = True,
 ) -> None:
     """
-    Crée OU réutilise des salons vocaux 'Team 1..K' et déplace les joueurs.
-    - Si 'Team i' existe déjà : réutilisation automatique (pas de suppression à cause d'un ancien TTL).
-      * Si ce salon avait été créé par le bot et suivi dans TEMP_CHANNELS, son TTL est **réinitialisé**.
-    - Si 'Team i' n'existe pas : création et ajout au suivi TTL.
+    Crée OU réutilise des salons vocaux f"{base_name} 1..K" et déplace les joueurs.
+    - Si {base_name} i existe déjà & reuse_existing: réutilisation (+ reset TTL s'il est suivi).
+    - Sinon: création et ajout au suivi TTL.
     - Le nettoyage ne supprime **que** les salons créés par le bot, au moment où leur TTL expire.
+    - Optionnel: crée un lobby et remonte lobby + teams en haut de la catégorie.
     """
     guild = inter.guild
     if not guild:
         return
 
-    # Catégorie par défaut = catégorie du vocal de l'auteur (si dispo)
+    # Catégorie par défaut = catégorie du vocal de l'auteur (si dispo), sinon catégorie du salon texte courant
     parent: Optional[discord.CategoryChannel] = None
     author = guild.get_member(inter.user.id)
     if author and author.voice and author.voice.channel and author.voice.channel.category:
         parent = author.voice.channel.category
+    if parent is None and hasattr(inter.channel, "category"):
+        parent = inter.channel.category  # type: ignore
 
     k = len(teams)
-    existing = await _find_existing_team_channels(guild, k)
+    if k <= 0:
+        return
 
     # Prépare la map de suivi pour ce serveur
-    if guild.id not in TEMP_CHANNELS:
-        TEMP_CHANNELS[guild.id] = {}
-    tracked = TEMP_CHANNELS[guild.id]
-
-    channels: List[discord.VoiceChannel] = []
+    tracked = TEMP_CHANNELS.setdefault(guild.id, {})
     expires_at = time.time() + max(1, int(ttl_minutes)) * 60
 
+    # Option réutilisation : ne chercher que dans la catégorie cible (si connue)
+    existing: List[Optional[discord.VoiceChannel]] = [None] * k
+    if reuse_existing:
+        existing = await _find_existing_team_channels(guild, k, base_name=base_name, category=parent)
+
+    channels: List[discord.VoiceChannel] = []
     for i in range(k):
         wanted_limit = sizes[i] if i < len(sizes) and sizes[i] > 0 else 0  # 0 = illimité
         ch = existing[i]
 
         if ch is None:
-            # Crée le salon Team i+1
+            # Crée le salon base_name i+1
             ch = await guild.create_voice_channel(
-                name=f"Team {i+1}",
+                name=f"{base_name} {i+1}",
                 user_limit=wanted_limit,
                 category=parent,
                 reason="TeamBuilder create voice channel",
             )
-            # Suit ce salon, avec sa date d'expiration
             tracked[ch.id] = expires_at
         else:
             # Réutilisation : ajuste le user_limit si nécessaire
@@ -208,6 +238,16 @@ async def create_and_move_voice(
                     pass
                 except discord.HTTPException:
                     pass
+
+    # Lobby + épinglage en haut (optionnel)
+    if pin_on_top or create_lobby:
+        await _ensure_lobby_and_pin_top(
+            guild,
+            parent=parent,
+            base_name=base_name,
+            lobby_name=lobby_name,
+            ttl_minutes=ttl_minutes,
+        )
 
     # Lancer (ou relancer) la boucle de nettoyage pour ce serveur
     asyncio.create_task(_cleanup_loop(guild))

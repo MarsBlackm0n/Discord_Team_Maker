@@ -1,13 +1,14 @@
 # app/cogs/arena.py
 from __future__ import annotations
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional
 from datetime import datetime
-from ..voice import create_and_move_voice, TEMP_CHANNELS  # pour déplacer et tracer les channels temp
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from ..team_logic import parse_mentions
+from ..voice import create_and_move_voice  # ← voix centralisée (crée/réutilise, lobby, pin on top)
 from ..db import (
     get_team_last, set_team_last,
     arena_get_active, arena_create, arena_update_scores_and_advance,
@@ -35,7 +36,6 @@ def round_robin_duos(user_ids: List[int]) -> List[List[List[int]]]:
     n = len(ids)
     if n < 4:
         raise ValueError("Minimum 4 joueurs.")
-    # méthode du cercle (rotation simple, un joueur "fixe")
     fixed = ids[-1]
     rot = ids[:-1]
     rounds: List[List[List[int]]] = []
@@ -45,7 +45,6 @@ def round_robin_duos(user_ids: List[int]) -> List[List[List[int]]]:
         for i in range(0, n, 2):
             pairs.append([line[i], line[i+1]])
         rounds.append(pairs)
-        # rotation classique
         rot = rot[-1:] + rot[:-1]
     return rounds
 
@@ -101,7 +100,7 @@ class ArenaCog(commands.Cog):
             await self.cog._process_report(interaction, joined)
 
     class ReportView(discord.ui.View):
-        """View avec un bouton “Reporter” qui ouvre le Modal."""
+        """View avec bouton “Reporter” + “Move” (déplacement vocal via voice.py)."""
         def __init__(self, cog: "ArenaCog", *, guild: discord.Guild, round_pairs: list[list[int]]):
             super().__init__(timeout=None)
             self.cog = cog
@@ -113,7 +112,7 @@ class ArenaCog(commands.Cog):
             prefills = [f"#{i+1}:" for i in range(min(4, len(self.round_pairs)))]
             modal = ArenaCog.ReportModal(self.cog, guild=self.guild, round_pairs=self.round_pairs, prefills=prefills)
             await interaction.response.send_modal(modal)
-        
+
         @discord.ui.button(label="Move", emoji="🚚", style=discord.ButtonStyle.secondary, custom_id="arena_move_button")
         async def move_round(self, interaction: discord.Interaction, button: discord.ui.Button):
             await interaction.response.defer(ephemeral=True, thinking=True)
@@ -134,26 +133,24 @@ class ArenaCog(commands.Cog):
 
             sizes = [len(t) for t in teams]
 
-            # Déplacement via voice.py
+            # Déplacement via voice.py (crée/réutilise, lobby, pin on top)
             try:
                 await create_and_move_voice(
                     interaction,
                     teams,
                     sizes,
-                    ttl_minutes=90,  # ajuste si besoin
+                    ttl_minutes=90,           # ajuste si besoin
+                    reuse_existing=True,
+                    base_name="Team",         # ou "Duo" si tu préfères nommer "Duo 1..K"
+                    create_lobby=True,
+                    lobby_name="Lobby Tournoi",
+                    pin_on_top=True,
                 )
             except discord.Forbidden:
                 await interaction.followup.send("⚠️ Permissions manquantes (Manage Channels / Move Members).", ephemeral=True)
                 return
 
-            # ✅ Remonter Lobby + Teams en haut de la catégorie et créer le lobby si besoin
-            await self.cog._ensure_lobby_and_pin_top(
-                interaction, base_name="Team", lobby_name="Lobby Tournoi"
-            )
-
             await interaction.followup.send("✅ Équipes déplacées vers les salons vocaux.", ephemeral=True)
-
-
 
     # ======================================================================
     # Helper commun : traitement du report (commande + modal)
@@ -261,76 +258,11 @@ class ArenaCog(commands.Cog):
             await self._post_podium_embed(inter.channel, arena2["participants"], arena2["scores"])
 
         return True
-    
-    async def _ensure_lobby_and_pin_top(self, inter: discord.Interaction, *, base_name: str = "Team", lobby_name: str = "Lobby Tournoi"):
-        """Crée un salon 'Lobby Tournoi' si absent et remonte Lobby + Team 1..K en haut de la catégorie."""
-        guild = inter.guild
-        if not guild:
-            return
-
-        # Catégorie cible : celle du vocal de l'utilisateur si dispo, sinon la catégorie du 1er salon Team courant
-        parent = None
-        if isinstance(inter.user, discord.Member) and inter.user.voice and inter.user.voice.channel:
-            parent = inter.user.voice.channel.category
-
-        def _is_team(ch: discord.VoiceChannel) -> bool:
-            return ch and ch.name.lower().startswith(base_name.lower() + " ")
-
-        # collecte des salons Team existants
-        team_channels: list[discord.VoiceChannel] = []
-        for ch in guild.voice_channels:
-            if _is_team(ch):
-                if parent is None:
-                    parent = ch.category
-                if ch.category == parent:
-                    team_channels.append(ch)
-
-        if parent is None:
-            # pas de contexte clair : on s'arrête proprement
-            return
-
-        # Lobby : chercher dans la même catégorie
-        lobby = None
-        for ch in parent.voice_channels:
-            if ch.name.lower() == lobby_name.lower():
-                lobby = ch
-                break
-
-        if lobby is None:
-            try:
-                lobby = await guild.create_voice_channel(
-                    name=lobby_name,
-                    user_limit=0,
-                    category=parent,
-                    reason="Arena lobby",
-                )
-                # trace pour /disbandteams si tu utilises TEMP_CHANNELS
-                TEMP_CHANNELS.setdefault(guild.id, []).append(lobby.id)
-            except discord.Forbidden:
-                pass  # pas bloquant
-
-        # Remonter Lobby puis Teams : position 0 = tout en haut
-        try:
-            if lobby:
-                await lobby.edit(position=0, reason="Pin lobby on top")
-        except discord.Forbidden:
-            pass
-
-        # Remonte les Team 1..K dans l'ordre
-        # (Discord réindexe à chaque edit, donc on fait des edits successifs vers le haut)
-        for ch in sorted(team_channels, key=lambda c: c.position):
-            try:
-                await ch.edit(position=0, reason="Pin teams on top")
-            except discord.Forbidden:
-                pass
-
-    
 
     # ======================================================================
     # Commandes
     # ======================================================================
 
-    # /arena start
     @group.command(name="start", description="Démarrer un tournoi Arena (duos qui tournent chaque round).")
     @app_commands.describe(
         rounds="(Optionnel) nombre de rounds. Si vide: n-1 (tout le monde avec tout le monde).",
@@ -350,13 +282,11 @@ class ArenaCog(commands.Cog):
         if members.strip():
             selected = parse_mentions(guild, members)
         else:
-            # dernier /team
             snap = await get_team_last(self.bot.settings.DB_PATH, guild.id)
             if snap and snap.get("teams"):
                 lookup = {m.id: m for m in guild.members}
                 ids = [int(uid) for team_ids in snap["teams"] for uid in team_ids]
                 selected = [lookup[i] for i in ids if i in lookup and not lookup[i].bot]
-            # sinon vocal de l'auteur
             if not selected:
                 me = guild.get_member(inter.user.id)
                 if me and me.voice and me.voice.channel:
@@ -387,7 +317,6 @@ class ArenaCog(commands.Cog):
         await self._post_round_embed(inter.channel, selected, schedule, current_round=1)
         await self._post_scores_embed(inter.channel, user_ids, {})  # scores 0 au départ
 
-    # /arena round
     @group.command(name="round", description="Afficher le round courant à jouer.")
     async def round(self, inter: discord.Interaction):
         await inter.response.defer(ephemeral=True, thinking=True)
@@ -402,7 +331,6 @@ class ArenaCog(commands.Cog):
         await inter.followup.send("📣 Round courant affiché dans le salon.", ephemeral=True)
         await self._post_round_embed(inter.channel, members, arena["schedule"], current_round=arena["current_round"])
 
-    # /arena status
     @group.command(name="status", description="Afficher le classement et l'état du tournoi Arena.")
     async def status(self, inter: discord.Interaction):
         await inter.response.defer(ephemeral=True, thinking=True)
@@ -417,7 +345,6 @@ class ArenaCog(commands.Cog):
             title_suffix=f"(Round {min(arena['current_round'], arena['rounds_total'])}/{arena['rounds_total']}, état: {arena['state']})"
         )
 
-    # /arena report
     @group.command(
         name="report",
         description="Reporter le résultat d'un round. Format: '#1:1 | 3:6 | @A @B:7' (tops 1..8)."
@@ -431,7 +358,6 @@ class ArenaCog(commands.Cog):
             await inter.followup.send("⛔ Réservé aux admins/owner.", ephemeral=True); return
         await self._process_report(inter, placements)
 
-    # /arena stop
     @group.command(name="stop", description="Terminer le tournoi Arena en cours et afficher le podium.")
     async def stop(self, inter: discord.Interaction):
         await inter.response.defer(ephemeral=True, thinking=True)
@@ -447,7 +373,6 @@ class ArenaCog(commands.Cog):
         await inter.followup.send("🏁 Tournoi arrêté. Podium affiché dans le salon.", ephemeral=True)
         await self._post_podium_embed(inter.channel, arena["participants"], arena["scores"])
 
-    # /arena cancel
     @group.command(name="cancel", description="Annuler (supprimer) le tournoi Arena en cours.")
     async def cancel(self, inter: discord.Interaction):
         await inter.response.defer(ephemeral=True, thinking=True)
@@ -475,39 +400,31 @@ class ArenaCog(commands.Cog):
         emb.description = "\n".join(lines) or "_(vide)_"
         emb.set_footer(text="Saisie rapide : '#1:1 | 3:6 | @A @B:7'  (tops 1..8)")
 
-        # ✅ Sauvegarde 'last team' pour que /move sache déplacer selon Duo 1..N
+        # Sauvegarde 'last team' pour que /move sache déplacer selon Duo 1..N
         try:
             import time
-            # Teams = les duos du round, dans l'ordre (Duo 1 = Team 1, etc.)
             snapshot = {
                 "mode": "arena_round",
                 "team_count": len(pairs),
                 "sizes": [2] * len(pairs),
                 "teams": [[int(u1), int(u2)] for (u1, u2) in pairs],
-                # ratings facultatifs (non requis par /move)
                 "ratings": {str(uid): 0.0 for uid in [x for duo in pairs for x in duo]},
-                "params": {
-                    "arena_round": int(current_round),
-                },
+                "params": {"arena_round": int(current_round)},
                 "created_by": members[0].id if members else 0,
                 "created_at": int(time.time()),
             }
-            # guild_id : récupérable via channel.guild.id
             guild_id = members[0].guild.id if members else None
             if guild_id:
                 await set_team_last(self.bot.settings.DB_PATH, guild_id, snapshot)
         except Exception:
             pass
 
-        # ✅ attache la view avec bouton “Reporter”
         the_guild = members[0].guild if members else None
         view = self.ReportView(self, guild=the_guild, round_pairs=pairs)
         await channel.send(embed=emb, view=view)
 
-
     async def _post_scores_embed(self, channel: discord.abc.Messageable, participants: List[int],
                                  scores: Dict[str, int], title_suffix: str = ""):
-        # normaliser (clés str -> int)
         norm = {int(k): int(v) for k, v in (scores or {}).items()}
         rows = sorted([(uid, norm.get(uid, 0)) for uid in participants], key=lambda x: (-x[1], x[0]))
         emb = discord.Embed(title=f"📊 Arena — Classement {title_suffix}".strip(), color=discord.Color.gold())
@@ -532,6 +449,6 @@ class ArenaCog(commands.Cog):
 async def setup(bot: commands.Bot):
     cog = ArenaCog(bot)
     await bot.add_cog(cog)
-    # Si tu veux rendre le bouton “Reporter” *persistant* après reboot,
-    # décommente la ligne ci-dessous et adapte la view pour tolérer guild=None/round_pairs=[]
+    # Pour rendre la view persistante après reboot, il faudrait une ReportView tolérante à guild=None/round_pairs=[],
+    # puis enregistrer ici une instance "globale" :
     # bot.add_view(ArenaCog.ReportView(cog, guild=None, round_pairs=[]))
