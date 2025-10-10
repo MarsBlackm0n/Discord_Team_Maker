@@ -773,22 +773,28 @@ async def arena_mark_results(db_path: str, arena_id: int, round_index: int,
                              reported_pairs: List[Tuple[int, int]]) -> Dict:
     """
     - Ajoute `new_scores` aux scores existants
-    - Ajoute les `reported_pairs` au round courant
-    - Avance au round suivant uniquement si toutes les paires du round courant ont été reportées
-    - Retourne l'arena mise à jour (dict)
+    - Marque les `reported_pairs` pour le round `round_index`
+    - Avance au round suivant si le round courant est complet
+    - Retourne l'arena mise à jour
     """
-    import aiosqlite
+    import aiosqlite, json
+
+    def _pair_key(a: int, b: int) -> str:
+        x, y = sorted((int(a), int(b)))
+        return f"{x}-{y}"
 
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
 
-        # 🔧 D'abord on tente dans la table moderne
+        # 1) On tente la table moderne
         cur = await db.execute("SELECT * FROM arena_tournaments WHERE id=?", (int(arena_id),))
         row = await cur.fetchone()
         await cur.close()
 
-        # 🧩 Si rien trouvé, on tente la table legacy
+        table = "arena_tournaments"
         if not row:
+            # 2) Fallback vers la table legacy
+            table = "arena"
             cur = await db.execute("SELECT * FROM arena WHERE id=?", (int(arena_id),))
             row = await cur.fetchone()
             await cur.close()
@@ -796,38 +802,47 @@ async def arena_mark_results(db_path: str, arena_id: int, round_index: int,
         if not row:
             raise RuntimeError("Arena introuvable")
 
-        # --- Décodage JSON (compatibilité double schéma) ---
-        if "participants_json" in row.keys():
-            participants = json.loads(row["participants_json"])
-            schedule = json.loads(row["schedule_json"])
-            scores = {int(k): int(v) for k, v in json.loads(row["scores_json"]).items()}
-            reported = json.loads(row.get("reported_json") or "{}")
-        else:
-            participants = _json_load(row["participants"], [])
-            schedule = _json_load(row["schedule"], [])
-            scores = {int(k): int(v) for k, v in _json_load(row["scores"], {}).items()}
-            reported = _json_load(row.get("reported") or "{}", {})
+        # --- Convertit la row en dict pour pouvoir faire .get() proprement
+        keys = row.keys()
+        rec = {k: row[k] for k in keys}
+
+        # --- Décodage JSON compatible double schéma
+        if "participants_json" in rec:  # nouveau schéma
+            participants = json.loads(rec["participants_json"]) if rec.get("participants_json") else []
+            schedule = json.loads(rec["schedule_json"]) if rec.get("schedule_json") else []
+            scores = {int(k): int(v) for k, v in (json.loads(rec["scores_json"]) if rec.get("scores_json") else {}).items()}
+            reported = json.loads(rec.get("reported_json") or "{}")
+        else:  # legacy
+            def _jload(val, default):
+                try:
+                    return json.loads(val) if isinstance(val, (str, bytes, bytearray)) else (val or default)
+                except Exception:
+                    return default
+            participants = _jload(rec.get("participants"), [])
+            schedule = _jload(rec.get("schedule"), [])
+            scores = {int(k): int(v) for k, v in _jload(rec.get("scores"), {}).items()}
+            reported = _jload(rec.get("reported"), {})
 
         if not isinstance(reported, dict):
             reported = {}
 
-        # --- 1) MAJ des scores ---
+        # --- 1) MAJ des scores
         for uid, pts in (new_scores or {}).items():
             uid = int(uid)
             scores[uid] = int(scores.get(uid, 0)) + int(pts)
 
-        # --- 2) Marquer les paires reportées ---
-        def _pair_key(a, b): return f"{min(a, b)}-{max(a, b)}"
+        # --- 2) Marquage des paires reportées pour round_index
         rkey = str(int(round_index))
         seen = set(reported.get(rkey, []))
         for (a, b) in (reported_pairs or []):
             seen.add(_pair_key(a, b))
         reported[rkey] = sorted(seen)
 
-        # --- 3) Vérifie complétude ---
-        cur_round = int(row["current_round"])
-        rounds_total = int(row["rounds_total"])
-        state = row["state"]
+        # --- 3) Complétude du round courant
+        cur_round = int(rec["current_round"])
+        rounds_total = int(rec["rounds_total"])
+        state = rec["state"]
+
         this_pairs = schedule[cur_round - 1] if 1 <= cur_round <= len(schedule) else []
         needed = {_pair_key(p[0], p[1]) for p in this_pairs}
         have = set(reported.get(str(cur_round), []))
@@ -841,8 +856,8 @@ async def arena_mark_results(db_path: str, arena_id: int, round_index: int,
                 state = "running"
                 cur_round = next_round
 
-        # --- 4) Sauvegarde ---
-        if "participants_json" in row.keys():
+        # --- 4) Persist
+        if table == "arena_tournaments":
             await db.execute("""
                 UPDATE arena_tournaments
                 SET scores_json=?, reported_json=?, current_round=?, state=?
@@ -857,7 +872,7 @@ async def arena_mark_results(db_path: str, arena_id: int, round_index: int,
 
         await db.commit()
 
-        # --- 5) Retour ---
+        # --- 5) Retour
         return {
             "id": int(arena_id),
             "participants": participants,
