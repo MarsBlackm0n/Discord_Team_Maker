@@ -12,6 +12,7 @@ class Settings:
     RESTART_MODE: str
     DB_PATH: Path
     RIOT_API_KEY: str | None
+    ENABLE_TRASH_TALK: bool 
 
 def load_settings() -> Settings:
     load_dotenv(dotenv_path=Path(__file__).with_name(".env"))  # en local ; ignoré en prod si variables déjà présentes
@@ -26,4 +27,5 @@ def load_settings() -> Settings:
         RESTART_MODE=os.getenv("RESTART_MODE", "manager"),
         DB_PATH=Path(os.getenv("DB_PATH", str(Path(__file__).parents[1] / "skills.db"))),
         RIOT_API_KEY=os.getenv("RIOT_API_KEY") or None,
+        ENABLE_TRASH_TALK=_str2bool(os.getenv("ENABLE_TRASH_TALK"), default=True),
     )
