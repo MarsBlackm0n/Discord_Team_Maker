@@ -167,26 +167,69 @@ async def create_and_move_voice(
 ) -> None:
     """
     Crée OU réutilise des salons vocaux f"{base_name} 1..K" et déplace les joueurs.
-    - Si {base_name} i existe déjà & reuse_existing: réutilisation (+ reset TTL s'il est suivi).
-    - Sinon: création et ajout au suivi TTL.
-    - Le nettoyage ne supprime **que** les salons créés par le bot, au moment où leur TTL expire.
-    - Optionnel: crée un lobby et remonte lobby + teams en haut de la catégorie.
+    Voir doc d’origine…
     """
     guild = inter.guild
     if not guild:
         return
 
-    # Catégorie par défaut = catégorie du vocal de l'auteur (si dispo), sinon catégorie du salon texte courant
+    # ---------- NOUVELLE LOGIQUE DE SÉLECTION DE CATÉGORIE ----------
+    def most_common(items):
+        from collections import Counter
+        if not items:
+            return None
+        return Counter(items).most_common(1)[0][0]
+
+    def looks_like_voice_cat(cat: discord.CategoryChannel | None) -> int:
+        """Score simple pour favoriser les catégories 'vocal/voice/voix'."""
+        if not cat:
+            return 0
+        name = cat.name.lower()
+        return int(
+            ("vocal" in name) or ("voice" in name) or ("voix" in name)
+        )
+
     parent: Optional[discord.CategoryChannel] = None
-    author = guild.get_member(inter.user.id)
-    if author and author.voice and author.voice.channel and author.voice.channel.category:
-        parent = author.voice.channel.category
-    if parent is None and hasattr(inter.channel, "category"):
-        parent = inter.channel.category  # type: ignore
+
+    # 1) Si des joueurs sont déjà en vocal → prendre la catégorie la plus courante.
+    member_voice_cats: List[discord.CategoryChannel] = []
+    for team in teams:
+        for m in team:
+            if isinstance(m, discord.Member) and m.voice and m.voice.channel and m.voice.channel.category:
+                member_voice_cats.append(m.voice.channel.category)
+    if member_voice_cats:
+        parent = most_common(member_voice_cats)
+
+    # 2) Sinon, s'il existe déjà des salons "{base_name} i" → réutiliser leur catégorie.
+    if parent is None:
+        existing_team_vcs = [vc for vc in guild.voice_channels if vc.name.lower().startswith(base_name.lower() + " ")]
+        if existing_team_vcs:
+            # Choisir la catégorie la plus fréquente parmi celles existantes
+            cats = [vc.category for vc in existing_team_vcs if vc.category]
+            parent = most_common(cats) if cats else None
+
+    # 3) Sinon, choisir une catégorie adaptée aux vocaux :
+    #    - catégorie avec le plus de voice channels
+    #    - tie-breaker: nom "vocal/voice/voix"
+    if parent is None:
+        from collections import defaultdict
+        count_by_cat: dict[Optional[discord.CategoryChannel], int] = defaultdict(int)
+        for vc in guild.voice_channels:
+            count_by_cat[vc.category] += 1
+        if count_by_cat:
+            # score (count, bonus_nom) trié descendant
+            parent = max(
+                count_by_cat.keys(),
+                key=lambda c: (count_by_cat[c], looks_like_voice_cat(c))
+            )
+
+    # 4) Si toujours None → on laissera Discord créer à la racine des salons vocaux (pas de catégorie texte).
+    # ---------------------------------------------------------------
 
     k = len(teams)
     if k <= 0:
         return
+
 
     # Prépare la map de suivi pour ce serveur
     tracked = TEMP_CHANNELS.setdefault(guild.id, {})
