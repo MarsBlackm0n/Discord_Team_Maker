@@ -637,13 +637,13 @@ class TeamCog(commands.Cog):
         embed.set_footer(text=footer)
         await inter.followup.send(embed=embed, ephemeral=True)
 
-    # -------- /go --------
-    @app_commands.command(name="go", description="Créer les salons vocaux et déplacer les joueurs selon la dernière config.")
+    # -------- /move --------
+    @app_commands.command(name="move", description="Créer les salons vocaux et déplacer les joueurs selon la dernière config.")
     @app_commands.describe(
         channel_ttl="Durée de vie des salons (minutes, défaut 90)",
         reuse_existing="Réutiliser des salons 'Team 1', 'Team 2' existants si présents (si ton voice.py le gère)"
     )
-    async def go(self, inter: discord.Interaction, channel_ttl: int = 90, reuse_existing: bool = True):
+    async def move(self, inter: discord.Interaction, channel_ttl: int = 90, reuse_existing: bool = True):
         await inter.response.defer(thinking=True)
         snap = await get_team_last(self.bot.settings.DB_PATH, inter.guild.id)
         if not snap:

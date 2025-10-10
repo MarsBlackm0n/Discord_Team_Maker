@@ -608,3 +608,117 @@ async def clear_team_signatures(db_path: str, guild_id: int, session: str, playe
         n = cur.rowcount if cur.rowcount is not None else 0
         await db.commit()
         return n
+
+
+# ====== Arena (tournoi LoL 2v2, classement individuel) ======
+
+ARENA_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS arena_tournaments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id INTEGER NOT NULL,
+  state TEXT NOT NULL,             -- setup|running|finished|cancelled
+  created_by INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  rounds_total INTEGER NOT NULL,
+  current_round INTEGER NOT NULL,  -- 1-based, prochain round à jouer
+  participants_json TEXT NOT NULL, -- [user_id,...] (ordre stable)
+  schedule_json TEXT NOT NULL,     -- [[ [u1,u2], [u3,u4], ... ], ...] rounds -> duos
+  scores_json TEXT NOT NULL        -- {user_id: points}
+);
+CREATE INDEX IF NOT EXISTS idx_arena_by_guild ON arena_tournaments(guild_id, state);
+"""
+
+async def _arena_ensure_tables(db_path: str):
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(ARENA_TABLE_SQL)
+        await db.commit()
+
+async def arena_get_active(db_path: str, guild_id: int):
+    """Retourne le tournoi Arena actif (setup/running) sous forme de dict Python (JSON déjà décodés), ou None."""
+    await _arena_ensure_tables(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute(
+            "SELECT * FROM arena_tournaments WHERE guild_id=? AND state IN ('setup','running') ORDER BY id DESC LIMIT 1",
+            (int(guild_id),)
+        ) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            cols = [c[0] for c in cur.description]
+            rec = dict(zip(cols, row))
+            rec["participants"] = json.loads(rec["participants_json"])
+            rec["schedule"] = json.loads(rec["schedule_json"])
+            rec["scores"] = json.loads(rec["scores_json"])
+            return rec
+
+async def arena_create(db_path: str, guild_id: int, created_by: int, rounds_total: int,
+                       participants: list[int], schedule: list[list[list[int]]]) -> int:
+    """Crée un tournoi Arena en état 'running' (round courant = 1). Retourne l'id."""
+    await _arena_ensure_tables(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        scores = {str(uid): 0 for uid in participants}
+        await db.execute("""
+            INSERT INTO arena_tournaments
+            (guild_id, state, created_by, created_at, rounds_total, current_round, participants_json, schedule_json, scores_json)
+            VALUES (?, 'running', ?, ?, ?, 1, ?, ?, ?)
+        """, (
+            int(guild_id), int(created_by), int(time.time()), int(rounds_total),
+            json.dumps(participants), json.dumps(schedule), json.dumps(scores)
+        ))
+        await db.commit()
+        cur = await db.execute("SELECT last_insert_rowid()")
+        (tid,) = await cur.fetchone()
+        return int(tid)
+
+async def arena_update_scores_and_advance(db_path: str, arena_id: int, new_scores: dict[int, int]):
+    """Ajoute des points aux joueurs et passe au round suivant (ou termine si dernier round atteint)."""
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute(
+            "SELECT rounds_total, current_round, scores_json FROM arena_tournaments WHERE id=?",
+            (int(arena_id),)
+        ) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return
+            rounds_total, current_round, scores_json = row
+            scores = json.loads(scores_json)
+
+        for uid, pts in (new_scores or {}).items():
+            scores[str(int(uid))] = int(scores.get(str(int(uid)), 0)) + int(pts)
+
+        next_round = int(current_round) + 1
+        state = "running" if next_round <= int(rounds_total) else "finished"
+
+        await db.execute("""
+            UPDATE arena_tournaments
+            SET scores_json=?, current_round=?, state=?
+            WHERE id=?
+        """, (
+            json.dumps(scores),
+            int(next_round if state == "running" else current_round),
+            state,
+            int(arena_id)
+        ))
+        await db.commit()
+
+async def arena_get_by_id(db_path: str, arena_id: int):
+    """Récupère un tournoi Arena par id (dict avec JSON décodés)."""
+    await _arena_ensure_tables(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute("SELECT * FROM arena_tournaments WHERE id=?", (int(arena_id),)) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            cols = [c[0] for c in cur.description]
+            rec = dict(zip(cols, row))
+            rec["participants"] = json.loads(rec["participants_json"])
+            rec["schedule"] = json.loads(rec["schedule_json"])
+            rec["scores"] = json.loads(rec["scores_json"])
+            return rec
+
+async def arena_set_state(db_path: str, arena_id: int, new_state: str):
+    """Force l'état (running/finished/cancelled)."""
+    await _arena_ensure_tables(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("UPDATE arena_tournaments SET state=? WHERE id=?", (new_state, int(arena_id)))
+        await db.commit()
