@@ -2,7 +2,7 @@
 from __future__ import annotations
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
-
+from ..voice import create_and_move_voice, TEMP_CHANNELS  # pour déplacer et tracer les channels temp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -113,6 +113,47 @@ class ArenaCog(commands.Cog):
             prefills = [f"#{i+1}:" for i in range(min(4, len(self.round_pairs)))]
             modal = ArenaCog.ReportModal(self.cog, guild=self.guild, round_pairs=self.round_pairs, prefills=prefills)
             await interaction.response.send_modal(modal)
+        
+        @discord.ui.button(label="Move", emoji="🚚", style=discord.ButtonStyle.secondary, custom_id="arena_move_button")
+        async def move_round(self, interaction: discord.Interaction, button: discord.ui.Button):
+            await interaction.response.defer(ephemeral=True, thinking=True)
+
+            guild = interaction.guild
+            pairs = self.round_pairs or []
+            if not guild or not pairs:
+                await interaction.followup.send("❌ Impossible de récupérer les duos du round.", ephemeral=True)
+                return
+
+            # Recompose les équipes (duos) du round
+            teams = []
+            for (u1, u2) in pairs:
+                m1 = guild.get_member(int(u1))
+                m2 = guild.get_member(int(u2))
+                team = [m for m in (m1, m2) if m and not m.bot]
+                teams.append(team)
+
+            sizes = [len(t) for t in teams]
+
+            # Déplacement via voice.py
+            try:
+                await create_and_move_voice(
+                    interaction,
+                    teams,
+                    sizes,
+                    ttl_minutes=90,  # ajuste si besoin
+                )
+            except discord.Forbidden:
+                await interaction.followup.send("⚠️ Permissions manquantes (Manage Channels / Move Members).", ephemeral=True)
+                return
+
+            # ✅ Remonter Lobby + Teams en haut de la catégorie et créer le lobby si besoin
+            await self.cog._ensure_lobby_and_pin_top(
+                interaction, base_name="Team", lobby_name="Lobby Tournoi"
+            )
+
+            await interaction.followup.send("✅ Équipes déplacées vers les salons vocaux.", ephemeral=True)
+
+
 
     # ======================================================================
     # Helper commun : traitement du report (commande + modal)
@@ -220,6 +261,70 @@ class ArenaCog(commands.Cog):
             await self._post_podium_embed(inter.channel, arena2["participants"], arena2["scores"])
 
         return True
+    
+    async def _ensure_lobby_and_pin_top(self, inter: discord.Interaction, *, base_name: str = "Team", lobby_name: str = "Lobby Tournoi"):
+        """Crée un salon 'Lobby Tournoi' si absent et remonte Lobby + Team 1..K en haut de la catégorie."""
+        guild = inter.guild
+        if not guild:
+            return
+
+        # Catégorie cible : celle du vocal de l'utilisateur si dispo, sinon la catégorie du 1er salon Team courant
+        parent = None
+        if isinstance(inter.user, discord.Member) and inter.user.voice and inter.user.voice.channel:
+            parent = inter.user.voice.channel.category
+
+        def _is_team(ch: discord.VoiceChannel) -> bool:
+            return ch and ch.name.lower().startswith(base_name.lower() + " ")
+
+        # collecte des salons Team existants
+        team_channels: list[discord.VoiceChannel] = []
+        for ch in guild.voice_channels:
+            if _is_team(ch):
+                if parent is None:
+                    parent = ch.category
+                if ch.category == parent:
+                    team_channels.append(ch)
+
+        if parent is None:
+            # pas de contexte clair : on s'arrête proprement
+            return
+
+        # Lobby : chercher dans la même catégorie
+        lobby = None
+        for ch in parent.voice_channels:
+            if ch.name.lower() == lobby_name.lower():
+                lobby = ch
+                break
+
+        if lobby is None:
+            try:
+                lobby = await guild.create_voice_channel(
+                    name=lobby_name,
+                    user_limit=0,
+                    category=parent,
+                    reason="Arena lobby",
+                )
+                # trace pour /disbandteams si tu utilises TEMP_CHANNELS
+                TEMP_CHANNELS.setdefault(guild.id, []).append(lobby.id)
+            except discord.Forbidden:
+                pass  # pas bloquant
+
+        # Remonter Lobby puis Teams : position 0 = tout en haut
+        try:
+            if lobby:
+                await lobby.edit(position=0, reason="Pin lobby on top")
+        except discord.Forbidden:
+            pass
+
+        # Remonte les Team 1..K dans l'ordre
+        # (Discord réindexe à chaque edit, donc on fait des edits successifs vers le haut)
+        for ch in sorted(team_channels, key=lambda c: c.position):
+            try:
+                await ch.edit(position=0, reason="Pin teams on top")
+            except discord.Forbidden:
+                pass
+
+    
 
     # ======================================================================
     # Commandes
