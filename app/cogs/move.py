@@ -17,8 +17,9 @@ class MoveCog(commands.Cog):
 
     @app_commands.command(
         name="move",
-        description="Créer (ou réutiliser) les salons Team 1..K et déplacer les joueurs d'après la dernière configuration d'équipes."
+        description="Créer/réutiliser les salons Team 1..K et déplacer les joueurs."
     )
+
     @app_commands.describe(
         channel_ttl="Durée de vie des salons (minutes, défaut 90)",
         reuse_existing="Réutiliser des salons 'Team 1', 'Team 2' existants si présents (si ton voice.py le gère)"

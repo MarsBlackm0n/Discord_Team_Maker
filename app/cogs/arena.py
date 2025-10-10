@@ -9,7 +9,7 @@ from discord.ext import commands
 
 from ..team_logic import parse_mentions
 from ..db import (
-    get_team_last, set_team_last
+    get_team_last, set_team_last,
     arena_get_active, arena_create, arena_update_scores_and_advance,
     arena_get_by_id, arena_set_state
 )
