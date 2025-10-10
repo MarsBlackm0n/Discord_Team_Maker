@@ -49,9 +49,11 @@ def round_robin_duos(user_ids: List[int]) -> List[List[List[int]]]:
         rot = rot[-1:] + rot[:-1]
     return rounds
 
-def points_for_rank(rank: int, team_count: int) -> int:
-    # 1er = team_count, 2e = team_count-1, ... 8e = 1
-    return max(1, team_count - rank + 1)
+
+# ---------- barème fixe Arena ----------
+def points_for_rank(rank: int) -> int:
+    """Barème Arena fixe : 1→8pts, 2→7, ..., 8→1. Tout le reste = 0."""
+    return 9 - int(rank) if 1 <= int(rank) <= 8 else 0
 
 
 class ArenaCog(commands.Cog):
@@ -59,6 +61,169 @@ class ArenaCog(commands.Cog):
         self.bot = bot
 
     group = app_commands.Group(name="arena", description="Tournoi LoL Arena (2v2, classement individuel)")
+
+    # ======================================================================
+    # UI: Bouton “Reporter” + Modal
+    # ======================================================================
+    class ReportModal(discord.ui.Modal, title="Reporter le round"):
+        """Modal avec 3–4 champs courts ; accepte '#1:2' ou '@A @B:6'."""
+        def __init__(self, cog: "ArenaCog", *, guild: discord.Guild, round_pairs: list[list[int]], prefills: list[str]):
+            super().__init__(timeout=180)
+            self.cog = cog
+            self.guild = guild
+            self.round_pairs = round_pairs
+            self.inputs: list[discord.ui.TextInput] = []
+
+            max_fields = min(4, len(round_pairs))
+            for i in range(max_fields):
+                u1, u2 = round_pairs[i]
+                m1 = guild.get_member(u1) if guild else None
+                m2 = guild.get_member(u2) if guild else None
+                label = f"Duo {i+1}: {(m1.display_name if m1 else u1)} & {(m2.display_name if m2 else u2)}"
+                ti = discord.ui.TextInput(
+                    label=label[:45],
+                    placeholder=f"ex: #{i+1}:1   ou   @A @B:6",
+                    default=prefills[i] if i < len(prefills) else "",
+                    required=False,
+                    max_length=100,
+                    style=discord.TextStyle.short,
+                )
+                self.inputs.append(ti)
+                self.add_item(ti)
+
+        async def on_submit(self, interaction: discord.Interaction):
+            chunks = [i.value.strip() for i in self.inputs if i.value and i.value.strip()]
+            joined = " | ".join(chunks)
+            if not joined:
+                await interaction.response.send_message("ℹ️ Rien à reporter.", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            await self.cog._process_report(interaction, joined)
+
+    class ReportView(discord.ui.View):
+        """View avec un bouton “Reporter” qui ouvre le Modal."""
+        def __init__(self, cog: "ArenaCog", *, guild: discord.Guild, round_pairs: list[list[int]]):
+            super().__init__(timeout=None)
+            self.cog = cog
+            self.guild = guild
+            self.round_pairs = round_pairs
+
+        @discord.ui.button(label="Reporter", emoji="📝", style=discord.ButtonStyle.primary, custom_id="arena_report_button")
+        async def open_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+            prefills = [f"#{i+1}:" for i in range(min(4, len(self.round_pairs)))]
+            modal = ArenaCog.ReportModal(self.cog, guild=self.guild, round_pairs=self.round_pairs, prefills=prefills)
+            await interaction.response.send_modal(modal)
+
+    # ======================================================================
+    # Helper commun : traitement du report (commande + modal)
+    # ======================================================================
+    async def _process_report(self, inter: discord.Interaction, placements: str) -> bool:
+        guild = inter.guild
+        arena = guild and await arena_get_active(self.bot.settings.DB_PATH, guild.id)
+        if not arena or arena["state"] != "running":
+            await inter.followup.send("ℹ️ Aucun tournoi Arena en cours.", ephemeral=True)
+            return False
+
+        cur_round = arena["current_round"]
+        schedule = arena["schedule"]
+        if cur_round < 1 or cur_round > len(schedule):
+            await inter.followup.send("❌ Plus de round à jouer.", ephemeral=True)
+            return False
+
+        expected_pairs = schedule[cur_round - 1]  # [[u1,u2], ...] (Duo 1..N)
+        expected_set = {tuple(sorted(p)) for p in expected_pairs}
+        duo_count = len(expected_pairs)
+
+        def _parse_duo_index(token: str) -> Optional[int]:
+            t = token.strip().lower()
+            for pref in ("#", "d", "duo"):
+                if t.startswith(pref):
+                    t = t[len(pref):]
+            try:
+                i = int(t)
+                if 1 <= i <= duo_count:
+                    return i
+            except Exception:
+                pass
+            return None
+
+        chunks = [c.strip() for c in (placements or "").split("|") if c.strip()]
+        if not chunks:
+            await inter.followup.send("❌ Saisie vide. Ex: `#1:1 | 3:6 | @A @B:7`.", ephemeral=True)
+            return False
+
+        used_ranks: set[int] = set()
+        used_pairs: set[tuple[int, int]] = set()
+        new_scores: dict[int, int] = {}
+
+        for ch in chunks:
+            if ":" not in ch:
+                await inter.followup.send(f"❌ Il manque le ':top' dans « {ch} » (ex.: ':1').", ephemeral=True)
+                return False
+            left, right = ch.rsplit(":", 1)
+            left = left.strip()
+            try:
+                rank = int(right.strip())
+            except ValueError:
+                await inter.followup.send(f"❌ Top invalide dans « {ch} » (attendu 1..8).", ephemeral=True)
+                return False
+            if rank < 1 or rank > 8:
+                await inter.followup.send(f"❌ Top hors borne dans « {ch} » (1..8).", ephemeral=True)
+                return False
+            if rank in used_ranks:
+                await inter.followup.send(f"❌ Le top {rank} est déjà attribué dans ta saisie.", ephemeral=True)
+                return False
+
+            # 1) Essayer un index de duo (#1, 1, d2, duo3)
+            idx = _parse_duo_index(left)
+            pair: tuple[int, int] | None = None
+            if idx is not None:
+                u1, u2 = expected_pairs[idx - 1]
+                pair = tuple(sorted((u1, u2)))
+            else:
+                # 2) Sinon parse mentions
+                ms = parse_mentions(guild, left)
+                ms = [m for m in ms if not m.bot]
+                if len(ms) != 2:
+                    await inter.followup.send(f"❌ Impossible de lire un duo dans: « {ch} »", ephemeral=True)
+                    return False
+                a, b = sorted([ms[0].id, ms[1].id])
+                pair = (a, b)
+                if pair not in expected_set:
+                    await inter.followup.send(f"❌ Ce duo n'est pas prévu au round courant: « {ch} »", ephemeral=True)
+                    return False
+
+            if pair in used_pairs:
+                await inter.followup.send("❌ Duo répété dans ta saisie (index/mentions en double).", ephemeral=True)
+                return False
+
+            used_ranks.add(rank)
+            used_pairs.add(pair)
+
+            pts = points_for_rank(rank)  # 1→8 pts pour chacun
+            a, b = pair
+            new_scores[a] = new_scores.get(a, 0) + pts
+            new_scores[b] = new_scores.get(b, 0) + pts
+
+        # Applique les points partiels saisis et avance si besoin
+        await arena_update_scores_and_advance(self.bot.settings.DB_PATH, arena["id"], new_scores)
+        arena2 = await arena_get_by_id(self.bot.settings.DB_PATH, arena["id"])
+
+        await inter.followup.send("✅ Résultat enregistré. Classement mis à jour.", ephemeral=True)
+        await self._post_scores_embed(inter.channel, arena2["participants"], arena2["scores"])
+
+        if arena2["state"] == "running":
+            lookup = {m.id: m for m in inter.guild.members}
+            members = [lookup[i] for i in arena2["participants"] if i in lookup]
+            await self._post_round_embed(inter.channel, members, arena2["schedule"], current_round=arena2["current_round"])
+        else:
+            await self._post_podium_embed(inter.channel, arena2["participants"], arena2["scores"])
+
+        return True
+
+    # ======================================================================
+    # Commandes
+    # ======================================================================
 
     # /arena start
     @group.command(name="start", description="Démarrer un tournoi Arena (duos qui tournent chaque round).")
@@ -142,69 +307,24 @@ class ArenaCog(commands.Cog):
             await inter.followup.send("ℹ️ Aucun tournoi Arena actif.", ephemeral=True); return
         ids = arena["participants"]
         await inter.followup.send("📊 Statut posté.", ephemeral=True)
-        await self._post_scores_embed(inter.channel, ids, arena["scores"],
-                                      title_suffix=f"(Round {min(arena['current_round'], arena['rounds_total'])}/{arena['rounds_total']}, état: {arena['state']})")
+        await self._post_scores_embed(
+            inter.channel, ids, arena["scores"],
+            title_suffix=f"(Round {min(arena['current_round'], arena['rounds_total'])}/{arena['rounds_total']}, état: {arena['state']})"
+        )
 
     # /arena report
-    @group.command(name="report", description="Reporter le résultat d'un round (ex: '@A @B | @C @D | ...' du 1er au dernier).")
+    @group.command(
+        name="report",
+        description="Reporter le résultat d'un round. Format: '#1:1 | 3:6 | @A @B:7' (tops 1..8)."
+    )
     @app_commands.describe(
-        placements="Duos du 1er au dernier, séparés par '|' (ex: '@A @B | @C @D | ...')."
+        placements="Duos avec top: '#1:1 | 3:6 | @A @B:7'. Tu peux n'envoyer que tes duos (report partiel)."
     )
     async def report(self, inter: discord.Interaction, placements: str):
         await inter.response.defer(ephemeral=True, thinking=True)
         if not is_admin_or_owner(self.bot, inter):
             await inter.followup.send("⛔ Réservé aux admins/owner.", ephemeral=True); return
-
-        guild = inter.guild
-        arena = guild and await arena_get_active(self.bot.settings.DB_PATH, guild.id)
-        if not arena or arena["state"] != "running":
-            await inter.followup.send("ℹ️ Aucun tournoi Arena en cours.", ephemeral=True); return
-
-        cur_round = arena["current_round"]
-        schedule = arena["schedule"]
-        if cur_round < 1 or cur_round > len(schedule):
-            await inter.followup.send("❌ Plus de round à jouer.", ephemeral=True); return
-
-        # Parse du string de placements
-        chunks = [c.strip() for c in placements.split("|") if c.strip()]
-        line_pairs: List[Tuple[int, int]] = []
-        for ch in chunks:
-            ms = parse_mentions(guild, ch)
-            ms = [m for m in ms if not m.bot]
-            if len(ms) != 2:
-                await inter.followup.send(f"❌ Impossible de lire un duo dans: `{ch}`", ephemeral=True); return
-            a, b = sorted([ms[0].id, ms[1].id])
-            line_pairs.append((a, b))
-
-        # Vérif : nombre et conformité des duos
-        expected_pairs = schedule[cur_round - 1]
-        team_count = len(expected_pairs)
-        if len(line_pairs) != team_count:
-            await inter.followup.send(f"❌ Il faut exactement **{team_count}** duos pour ce round.", ephemeral=True); return
-        expected_set = {tuple(sorted(pair)) for pair in expected_pairs}
-        given_set = set(line_pairs)
-        if expected_set != given_set:
-            await inter.followup.send("❌ Les duos saisis ne correspondent pas aux duos du round courant.", ephemeral=True); return
-
-        # Points joueurs
-        new_scores: Dict[int, int] = {}
-        for rank, (u1, u2) in enumerate(line_pairs, start=1):
-            pts = points_for_rank(rank, team_count)
-            new_scores[u1] = new_scores.get(u1, 0) + pts
-            new_scores[u2] = new_scores.get(u2, 0) + pts
-
-        await arena_update_scores_and_advance(self.bot.settings.DB_PATH, arena["id"], new_scores)
-        arena2 = await arena_get_by_id(self.bot.settings.DB_PATH, arena["id"])
-
-        await inter.followup.send("✅ Résultat enregistré. Classement mis à jour.", ephemeral=True)
-        await self._post_scores_embed(inter.channel, arena2["participants"], arena2["scores"])
-
-        if arena2["state"] == "running":
-            lookup = {m.id: m for m in inter.guild.members}
-            members = [lookup[i] for i in arena2["participants"] if i in lookup]
-            await self._post_round_embed(inter.channel, members, arena2["schedule"], current_round=arena2["current_round"])
-        else:
-            await self._post_podium_embed(inter.channel, arena2["participants"], arena2["scores"])
+        await self._process_report(inter, placements)
 
     # /arena stop
     @group.command(name="stop", description="Terminer le tournoi Arena en cours et afficher le podium.")
@@ -235,7 +355,9 @@ class ArenaCog(commands.Cog):
         await arena_set_state(self.bot.settings.DB_PATH, arena["id"], "cancelled")
         await inter.followup.send("🛑 Tournoi Arena annulé.", ephemeral=True)
 
-    # ------- embeds -------
+    # ======================================================================
+    # Rendu embeds
+    # ======================================================================
     async def _post_round_embed(self, channel: discord.abc.Messageable, members: List[discord.Member],
                                 schedule: List[List[List[int]]], current_round: int):
         lookup = {m.id: m for m in members}
@@ -246,11 +368,16 @@ class ArenaCog(commands.Cog):
             lines.append(f"**Duo {i}** — {m1.mention if m1 else f'<@{u1}>'} & {m2.mention if m2 else f'<@{u2}>'}")
         emb = discord.Embed(title=f"🧭 Arena — Round {current_round}", color=discord.Color.blurple())
         emb.description = "\n".join(lines) or "_(vide)_"
-        emb.set_footer(text="Report: /arena report  « @A @B | @C @D | ... » (du 1er au dernier)")
-        await channel.send(embed=emb)
+        emb.set_footer(text="Saisie rapide : '#1:1 | 3:6 | @A @B:7'  (tops 1..8)")
+
+        # ✅ attache la view avec bouton “Reporter”
+        the_guild = members[0].guild if members else None
+        view = self.ReportView(self, guild=the_guild, round_pairs=pairs)
+        await channel.send(embed=emb, view=view)
 
     async def _post_scores_embed(self, channel: discord.abc.Messageable, participants: List[int],
                                  scores: Dict[str, int], title_suffix: str = ""):
+        # normaliser (clés str -> int)
         norm = {int(k): int(v) for k, v in (scores or {}).items()}
         rows = sorted([(uid, norm.get(uid, 0)) for uid in participants], key=lambda x: (-x[1], x[0]))
         emb = discord.Embed(title=f"📊 Arena — Classement {title_suffix}".strip(), color=discord.Color.gold())
@@ -273,4 +400,8 @@ class ArenaCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(ArenaCog(bot))
+    cog = ArenaCog(bot)
+    await bot.add_cog(cog)
+    # Si tu veux rendre le bouton “Reporter” *persistant* après reboot,
+    # décommente la ligne ci-dessous et adapte la view pour tolérer guild=None/round_pairs=[]
+    # bot.add_view(ArenaCog.ReportView(cog, guild=None, round_pairs=[]))
