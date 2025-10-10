@@ -589,7 +589,7 @@ class TeamCog(commands.Cog):
                 "ratings": {str(uid): float(ratings[uid]) for uid in [m.id for t in teams for m in t]},
                 "params": {
                     "with_groups": with_groups, "avoid_pairs": avoid_pairs, "members": members,
-                    "session": session, "attempts": attempts
+                    "session": params["session"], "attempts": attempts
                 },
                 "created_by": inter.user.id,
                 "created_at": int(time.time()),
@@ -600,7 +600,7 @@ class TeamCog(commands.Cog):
 
         # Bouton Reroll avec les mêmes paramètres (+ stock global simple)
         params = dict(
-            session=session, team_count=team_count, sizes=sizes,
+            session=f"auto-{datetime.utcnow().strftime('%Y%m%d')}", team_count=team_count, sizes=sizes,
             with_groups=with_groups, avoid_pairs=avoid_pairs,
             members=members, mode=mode, attempts=attempts, commit=commit,
             selected_members=selected_members, sizes_list_override=sizes_list_override,
