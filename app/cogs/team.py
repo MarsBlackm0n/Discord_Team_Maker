@@ -349,7 +349,8 @@ class TeamCog(commands.Cog):
         if team_count < 2 or team_count > 6:
             await inter.followup.send("❌ team_count doit être entre 2 et 6.")
             return
-
+        
+        session = f"auto-{datetime.utcnow().strftime('%Y%m%d')}"
         guild = inter.guild
         author = guild and guild.get_member(inter.user.id)
 
@@ -396,7 +397,7 @@ class TeamCog(commands.Cog):
 
         # Prépare les params pour un Reroll identique (mêmes joueurs/tailles) — session auto
         params = dict(
-            session=f"auto-{datetime.utcnow().strftime('%Y%m%d')}",
+            session=session,
             team_count=team_count,
             sizes="",                        # on figera via sizes_list_override
             with_groups=with_groups,
@@ -442,7 +443,7 @@ class TeamCog(commands.Cog):
                 "ratings": {str(uid): float(ratings[uid]) for uid in [m.id for t in teams for m in t]},
                 "params": {
                     "with_groups": with_groups, "avoid_pairs": avoid_pairs, "members": members,
-                    "session": params["session"], "attempts": 200
+                    "session": session, "attempts": 200
                 },
                 "created_by": inter.user.id,
                 "created_at": int(time.time()),
