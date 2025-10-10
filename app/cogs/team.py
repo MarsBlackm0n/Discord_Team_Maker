@@ -637,41 +637,6 @@ class TeamCog(commands.Cog):
         embed.set_footer(text=footer)
         await inter.followup.send(embed=embed, ephemeral=True)
 
-    # -------- /move --------
-    @app_commands.command(name="move", description="Créer les salons vocaux et déplacer les joueurs selon la dernière config.")
-    @app_commands.describe(
-        channel_ttl="Durée de vie des salons (minutes, défaut 90)",
-        reuse_existing="Réutiliser des salons 'Team 1', 'Team 2' existants si présents (si ton voice.py le gère)"
-    )
-    async def move(self, inter: discord.Interaction, channel_ttl: int = 90, reuse_existing: bool = True):
-        await inter.response.defer(thinking=True)
-        snap = await get_team_last(self.bot.settings.DB_PATH, inter.guild.id)
-        if not snap:
-            await inter.followup.send("ℹ️ Aucune config enregistrée. Lance d'abord /team ou /teamroll.", ephemeral=True)
-            return
-
-        # Recompose les objets Member à partir des IDs
-        guild = inter.guild
-        teams: List[List[discord.Member]] = []
-        for team_ids in snap.get("teams", []):
-            members_obj = []
-            for uid in team_ids:
-                m = guild.get_member(int(uid))
-                if m and not m.bot:
-                    members_obj.append(m)
-            teams.append(members_obj)
-
-        sizes = snap.get("sizes") or [len(t) for t in teams]
-        try:
-            await create_and_move_voice(
-                inter,
-                teams,
-                sizes,
-                ttl_minutes=max(int(channel_ttl), 1),
-            )
-            await inter.followup.send("🚀 Salons créés/réutilisés et joueurs déplacés.", ephemeral=True)
-        except discord.Forbidden:
-            await inter.followup.send("⚠️ Permissions manquantes (Manage Channels / Move Members).", ephemeral=True)
 
     # -------- /teamroll_end (pairs) --------
     @app_commands.command(name="teamroll_end", description="Terminer/effacer une session de roll (réinitialise l’historique des paires).")

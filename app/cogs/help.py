@@ -18,7 +18,7 @@ HELP_SECTIONS = {
                 "Options clés : `mode` (balanced/random), `team_count`, `sizes` (ex: \"3/3/2\"), "
                 "`with_groups` (garder ensemble), `avoid_pairs` (séparer), `members` (mentions), "
                 "`create_voice`, `channel_ttl`, `auto_import_riot`.\n"
-                "💾 Sauvegarde un *snapshot* (dernière config) réutilisé par `/go`, `/teamroll`, `/tournament`."
+                "💾 Sauvegarde un *snapshot* (dernière config) réutilisé par `/move`, `/teamroll`, `/tournament`."
             ),
             "examples": [
                 "/team",
@@ -46,7 +46,7 @@ HELP_SECTIONS = {
             "desc": "Affiche la **dernière configuration** d'équipes enregistrée pour le serveur.",
         },
         {
-            "name": "/go",
+            "name": "/move",
             "desc": (
                 "Crée/réutilise les salons vocaux **Team 1..K** et **déplace** les joueurs selon la **dernière config**. "
                 "Option : `channel_ttl` (durée de vie des salons)."
@@ -54,7 +54,7 @@ HELP_SECTIONS = {
         },
         {
             "name": "/disbandteams",
-            "desc": "Supprime les **salons vocaux temporaires** créés via `/team create_voice:true` ou `/go`.",
+            "desc": "Supprime les **salons vocaux temporaires** créés via `/team create_voice:true` ou `/move`.",
         },
         {
             "name": "/move",
@@ -202,7 +202,7 @@ COMMAND_DETAILS = {
             "Crée des équipes **équilibrées** (par défaut) ou **aléatoires**. "
             "Source : **vocal** de l'auteur ou `members:` (mentions). "
             "Peut créer les salons vocaux Team 1..K. "
-            "Sauvegarde un *snapshot* utilisable par `/go`, `/teamroll`, `/tournament`."
+            "Sauvegarde un *snapshot* utilisable par `/move`, `/teamroll`, `/tournament`."
         ),
         "examples": [
             "/team",
@@ -226,7 +226,7 @@ COMMAND_DETAILS = {
         "desc": "Affiche la **dernière config** d'équipes (joueurs + ratings + totaux).",
     },
     "go": {
-        "title": "ℹ️ /go",
+        "title": "ℹ️ /move",
         "desc": "Crée/réutilise les **salons vocaux** Team 1..K et **déplace** les joueurs selon la dernière config.",
     },
     "disbandteams": {
@@ -322,16 +322,16 @@ class HelpCog(commands.Cog):
                 "### 💡 Flow typique (customisable)\n"
                 "1️⃣ `/team` — crée les équipes (équilibrées ou aléatoires)\n"
                 "2️⃣ (optionnel) `/teamroll` — mixe en évitant répétitions (bouton 🎲 pour reroll)\n"
-                "3️⃣ `/go` — crée/réutilise les salons vocaux et déplace les joueurs\n"
+                "3️⃣ `/move` — crée/réutilise les salons vocaux et déplace les joueurs\n"
                 "4️⃣ (optionnel) `/tournament create/add/start/view` — bracket **Single Elimination**\n"
                 "   ou `/arena start/round/report/status` — **Arena 2v2** avec classement individuel\n"
                 "5️⃣ `/disbandteams` — nettoie les salons après la session\n\n"
-                "💾 La **dernière config** d’équipes est mémorisée (utilisée par `/go`, `/teamroll`, `/tournament`, `/arena`)."
+                "💾 La **dernière config** d’équipes est mémorisée (utilisée par `/move`, `/teamroll`, `/tournament`, `/arena`)."
             )
             # Résumé court par catégories
             embed.add_field(
                 name="👥 Équipes",
-                value="`/team`  `/teamroll`  `/team_last`  `/go`  `/disbandteams`  `/move`",
+                value="`/team`  `/teamroll`  `/team_last`  `/move`  `/disbandteams`  `/move`",
                 inline=False
             )
             embed.add_field(

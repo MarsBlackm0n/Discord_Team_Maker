@@ -9,7 +9,7 @@ from discord.ext import commands
 
 from ..team_logic import parse_mentions
 from ..db import (
-    get_team_last,
+    get_team_last, set_team_last
     arena_get_active, arena_create, arena_update_scores_and_advance,
     arena_get_by_id, arena_set_state
 )
@@ -370,10 +370,35 @@ class ArenaCog(commands.Cog):
         emb.description = "\n".join(lines) or "_(vide)_"
         emb.set_footer(text="Saisie rapide : '#1:1 | 3:6 | @A @B:7'  (tops 1..8)")
 
+        # ✅ Sauvegarde 'last team' pour que /move sache déplacer selon Duo 1..N
+        try:
+            import time
+            # Teams = les duos du round, dans l'ordre (Duo 1 = Team 1, etc.)
+            snapshot = {
+                "mode": "arena_round",
+                "team_count": len(pairs),
+                "sizes": [2] * len(pairs),
+                "teams": [[int(u1), int(u2)] for (u1, u2) in pairs],
+                # ratings facultatifs (non requis par /move)
+                "ratings": {str(uid): 0.0 for uid in [x for duo in pairs for x in duo]},
+                "params": {
+                    "arena_round": int(current_round),
+                },
+                "created_by": members[0].id if members else 0,
+                "created_at": int(time.time()),
+            }
+            # guild_id : récupérable via channel.guild.id
+            guild_id = members[0].guild.id if members else None
+            if guild_id:
+                await set_team_last(self.bot.settings.DB_PATH, guild_id, snapshot)
+        except Exception:
+            pass
+
         # ✅ attache la view avec bouton “Reporter”
         the_guild = members[0].guild if members else None
         view = self.ReportView(self, guild=the_guild, round_pairs=pairs)
         await channel.send(embed=emb, view=view)
+
 
     async def _post_scores_embed(self, channel: discord.abc.Messageable, participants: List[int],
                                  scores: Dict[str, int], title_suffix: str = ""):
