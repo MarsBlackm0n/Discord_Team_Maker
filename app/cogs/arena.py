@@ -12,7 +12,7 @@ from ..voice import create_and_move_voice  # ← voix centralisée (crée/réuti
 from ..db import (
     get_team_last, set_team_last,
     arena_get_active, arena_create, arena_update_scores_and_advance,
-    arena_get_by_id, arena_set_state
+    arena_get_by_id, arena_set_state, arena_mark_results
 )
 
 def is_admin_or_owner(bot: commands.Bot, inter: discord.Interaction) -> bool:
@@ -292,19 +292,44 @@ class ArenaCog(commands.Cog):
             new_scores[a] = new_scores.get(a, 0) + pts
             new_scores[b] = new_scores.get(b, 0) + pts
 
-        # Applique les points partiels saisis et avance si besoin
-        await arena_update_scores_and_advance(self.bot.settings.DB_PATH, arena["id"], new_scores)
-        arena2 = await arena_get_by_id(self.bot.settings.DB_PATH, arena["id"])
+        # ➜ Nouveau flux “report partiel” : n’avance que si le round est complet
+        reported_pairs = [(a, b) for (a, b) in used_pairs]  # on marque seulement les duos saisis
 
-        await inter.followup.send("✅ Résultat enregistré. Classement mis à jour.", ephemeral=True)
+        arena2 = await arena_mark_results(
+            self.bot.settings.DB_PATH,
+            arena["id"],
+            cur_round,
+            new_scores,
+            reported_pairs,
+        )
+
+        await inter.followup.send("✅ Résultat enregistré.", ephemeral=True)
         await self._post_scores_embed(inter.channel, arena2["participants"], arena2["scores"])
 
-        if arena2["state"] == "running":
+        # passage au round suivant uniquement si l'actuel est désormais complet
+        if arena2["state"] == "running" and arena2["current_round"] != arena["current_round"]:
             lookup = {m.id: m for m in inter.guild.members}
             members = [lookup[i] for i in arena2["participants"] if i in lookup]
-            await self._post_round_embed(inter.channel, members, arena2["schedule"], current_round=arena2["current_round"])
-        else:
+            await self._post_round_embed(
+                inter.channel, members, arena2["schedule"], current_round=arena2["current_round"]
+            )
+        elif arena2["state"] == "finished":
             await self._post_podium_embed(inter.channel, arena2["participants"], arena2["scores"])
+        else:
+            # round non-complet : indiquer ce qu'il manque (optionnel mais utile)
+            expected_pairs = arena2["schedule"][arena["current_round"] - 1]
+            expected = {tuple(sorted(p)) for p in expected_pairs}
+            have = set(
+                tuple(map(int, k.split("-")))
+                for k in arena2.get("reported", {}).get(str(arena["current_round"]), [])
+            )
+            missing = expected - have
+            if missing:
+                lines = [f"· duo <@{a}> & <@{b}>" for (a, b) in sorted(list(missing))]
+                await inter.channel.send(
+                    f"⏳ En attente de résultats pour {len(missing)} duo(x) du round {arena['current_round']}:\n"
+                    + "\n".join(lines)
+                )
 
         return True
 
@@ -510,6 +535,12 @@ class ArenaCog(commands.Cog):
                 "La VAR est formelle, t'as bien perdu.",
                 "Tu devrais aller jouer à Minecraft.",
                 "Faut se rendre à l'évidence, t'es trop vieux pour ces conneries.",
+                "La terre est plate et ton score aussi.",
+                "Les résultats viennent de l'OMS, donc forcément… suspects.",
+                "Les stats sont manipulées par Pfizer.",
+                "Le bot de score est financé par les Francs-maçons.",
+                "J'ai vu une vidéo sur YouTube qui prouve que t'as gagné, fais tes propres recherches.",
+                "Un peu d'adénochrome et tu serais meilleur, demande à Bill Gates et Rothschild.",
             ]
             emb.add_field(
                 name="🖕 Loser Award",

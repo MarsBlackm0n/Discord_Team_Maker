@@ -722,3 +722,90 @@ async def arena_set_state(db_path: str, arena_id: int, new_state: str):
     async with aiosqlite.connect(db_path) as db:
         await db.execute("UPDATE arena_tournaments SET state=? WHERE id=?", (new_state, int(arena_id)))
         await db.commit()
+
+
+# Utilitaires JSON
+def _json_load(s, default):
+    try:
+        return json.loads(s) if isinstance(s, (str, bytes, bytearray)) else (s or default)
+    except Exception:
+        return default
+
+def _pair_key(a: int, b: int) -> str:
+    x, y = sorted((int(a), int(b)))
+    return f"{x}-{y}"
+
+async def arena_mark_results(db_path: str, arena_id: int, round_index: int,
+                             new_scores: Dict[int, int],
+                             reported_pairs: List[Tuple[int, int]]) -> Dict:
+    """
+    - Ajoute `new_scores` aux scores existants
+    - Ajoute les `reported_pairs` au round courant
+    - Avance au round suivant uniquement si toutes les paires du round courant ont été reportées
+    - Retourne l'arena mise à jour (dict)
+    """
+    import aiosqlite
+
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM arena WHERE id = ?", (int(arena_id),))
+        row = await cur.fetchone()
+        await cur.close()
+        if not row:
+            raise RuntimeError("Arena introuvable")
+
+        participants = [int(x) for x in _json_load(row["participants"], [])]
+        schedule = _json_load(row["schedule"], [])
+        scores = {int(k): int(v) for k, v in _json_load(row["scores"], {}).items()}
+        reported = _json_load(row.get("reported") if "reported" in row.keys() else row["reported"] if "reported" in row.keys() else "{}", {})  # compat
+        if not isinstance(reported, dict):
+            reported = {}
+
+        # 1) update scores (addition)
+        for uid, pts in (new_scores or {}).items():
+            uid = int(uid)
+            scores[uid] = int(scores.get(uid, 0)) + int(pts)
+
+        # 2) mark reported pairs for this round
+        rkey = str(int(round_index))
+        seen = set(reported.get(rkey, []))
+        for (a, b) in (reported_pairs or []):
+            seen.add(_pair_key(a, b))
+        reported[rkey] = sorted(seen)
+
+        # 3) check completeness
+        cur_round = int(row["current_round"])
+        rounds_total = int(row["rounds_total"])
+        state = row["state"]
+
+        this_pairs = schedule[cur_round - 1] if 1 <= cur_round <= len(schedule) else []
+        needed = {_pair_key(p[0], p[1]) for p in this_pairs}
+        have = set(reported.get(str(cur_round), []))
+        complete = (needed and have.issuperset(needed))
+
+        if complete:
+            cur_round += 1
+            if cur_round > rounds_total:
+                state = "finished"
+                cur_round = rounds_total  # clamp
+            else:
+                state = "running"
+
+        # 4) save
+        await db.execute(
+            "UPDATE arena SET scores=?, reported=?, current_round=?, state=? WHERE id=?",
+            (json.dumps(scores), json.dumps(reported), cur_round, state, int(arena_id))
+        )
+        await db.commit()
+
+        # 5) retourner l'arena mise à jour (comme attendu par le cog)
+        return {
+            "id": int(arena_id),
+            "participants": participants,
+            "schedule": schedule,
+            "scores": scores,
+            "reported": reported,
+            "current_round": cur_round,
+            "rounds_total": rounds_total,
+            "state": state,
+        }
