@@ -105,7 +105,7 @@ class RatingsCog(commands.Cog):
     @app_commands.describe(user="Membre", summoner="Pseudo LoL exact", region="EUW/EUNE/NA/KR/BR/JP/LAN/LAS/OCE/TR/RU")
     async def linklol(self, inter: discord.Interaction, user: discord.Member, summoner: str, region: str):
         from ..db import link_lol  # éviter cycle import
-        await inter.response.defer(ephemeral=True, thinking=True)
+        await inter.response.defer(ephemeral=False, thinking=True)
         code = PLATFORM_MAP.get(region.upper())
         if not code:
             await inter.followup.send("❌ Région invalide.")
