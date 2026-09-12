@@ -12,7 +12,7 @@ HELP_SECTIONS = {
     "🧩 Équipes (Team Builder)": [
         {
             "name": "/setroles",
-            "desc": "Enregistre 1 à 5 rôles par ordre de préférence. En 5v5, les rôles sont prioritaires dans les deux modes ; seul balanced utilise l’ELO. Les préférences inconnues et les placements hors préférences sont signalés. Pour un autre joueur : permission Gérer le serveur.",
+            "desc": "Enregistre 1 à 5 rôles par ordre de préférence. En 5v5, random optimise les rôles sans ELO ; balanced optimise les rôles sous le seuil elo_gap (50 par défaut), ou minimise l’écart si le seuil est impossible. Les préférences inconnues et les placements hors préférences sont signalés. Pour un autre joueur : permission Gérer le serveur.",
             "examples": ["/setroles first_role:mid second_role:top third_role:jgl"],
         },
         {
@@ -26,12 +26,13 @@ HELP_SECTIONS = {
                 "du salon vocal de l'auteur (ou d'une liste de mentions). "
                 "Options clés : `mode` (balanced/random), `team_count`, `sizes` (ex: \"3/3/2\"), "
                 "`with_groups` (garder ensemble), `avoid_pairs` (séparer), `members` (mentions), "
-                "`create_voice`, `channel_ttl`, `auto_import_riot`.\n"
+                "`create_voice`, `channel_ttl`, `auto_import_riot`, `elo_gap` (écart moyen maximal en balanced 5v5, défaut 50).\n"
                 "💾 Sauvegarde un *snapshot* (dernière config) réutilisé par `/move`, `/teamroll`, `/tournament`."
             ),
             "examples": [
                 "/team",
                 "/team mode:random team_count:3",
+                "/team mode:balanced elo_gap:100",
                 "/team sizes:\"3/3/2\" with_groups:\"@A @B | @C @D\" avoid_pairs:\"@X @Y\"",
                 "/team members:\"@A @B @C @D @E @F\" create_voice:true channel_ttl:60",
             ],
@@ -42,7 +43,7 @@ HELP_SECTIONS = {
                 "Favorise une combinaison différente à qualité de rôles et d’équilibre égale, en évitant les paires déjà vues "
                 "sur la **session** en cours. Fallback: si pas de mentions et pas de vocal, reprend la "
                 "dernière config `/team` (mêmes joueurs et tailles).\n"
-                "🎛️ Paramètres utiles : `session` (si vide → `auto-YYYYMMDD`), `attempts`, `mode` (balanced/random). "
+                "🎛️ Paramètres utiles : `session` (si vide → `auto-YYYYMMDD`), `attempts`, `mode` (balanced/random), `elo_gap` (reprend le dernier seuil si omis). "
                 "📌 Un bouton **Reroll** est ajouté sous l'embed pour rejouer avec les mêmes paramètres."
             ),
             "examples": [

@@ -26,7 +26,7 @@ from ..team_logic import (
     parse_avoid_pairs
 )
 from ..voice import create_and_move_voice
-from ..lanes import ROLES, parse_roles, select_teams, format_player, signature
+from ..lanes import ROLES, parse_roles, select_teams, format_player, signature, DEFAULT_ELO_GAP, average_elo_gap
 
 
 class TeamCog(commands.Cog):
@@ -81,13 +81,20 @@ class TeamCog(commands.Cog):
         await inter.followup.send(f"**{target.display_name}** : {text}", ephemeral=True)
 
     @staticmethod
-    def teams_embed(teams, ratings, assignments, preferences, mode, title):
+    def teams_embed(teams, ratings, assignments, preferences, mode, title, elo_gap=DEFAULT_ELO_GAP):
         balanced = mode.lower() == "balanced"
         embed = discord.Embed(title=title, color=discord.Color.blurple())
         embed.description = (
             "Un joueur par rôle • priorité aux préférences, puis à leur répartition entre équipes."
             if assignments else "Attribution des rôles disponible pour deux équipes de 5 joueurs."
         )
+        if assignments and balanced:
+            gap = average_elo_gap(teams, ratings)
+            embed.description = f"Écart de rating moyen : **{gap:.2f}** • Seuil : **{elo_gap:g}**."
+            if gap > elo_gap:
+                embed.description += "\n⚠ Seuil impossible à respecter avec les contraintes de joueurs prioritaires : plus petit écart possible retenu, puis optimisation des rôles."
+            else:
+                embed.description += "\nSeuil respecté : priorité aux rôles et à la répartition des concessions, puis au plus petit écart."
         if assignments and any(not preferences.get(m.id) for t in teams for m in t):
             embed.description += "\nPréférences inconnues : aucune pénalité de rôle ; renseignez /setroles."
         for idx, team in enumerate(teams, 1):
@@ -195,6 +202,7 @@ class TeamCog(commands.Cog):
         # --- ajouts pour réutiliser le dernier /team ---
         selected_members: Optional[List[discord.Member]] = None,
         sizes_list_override: Optional[List[int]] = None,
+        elo_gap: float = DEFAULT_ELO_GAP,
     ) -> tuple[discord.Embed, List[List[discord.Member]], Dict[int, float]]:
         guild = inter.guild
         if not guild:
@@ -257,7 +265,7 @@ class TeamCog(commands.Cog):
         preferences = await load_lane_preferences(self.bot.settings.DB_PATH, guild.id)
         teams, assignments, violations = select_teams(
             selected, ratings, sizes_list, with_groups_list, avoid_pairs_set,
-            preferences, mode, attempts, seen_signatures, pair_counts,
+            preferences, mode, attempts, seen_signatures, pair_counts, elo_gap=elo_gap,
         )
         exhausted = signature(teams) in seen_signatures
         rep = sum(pair_counts.get(tuple(sorted((a.id, b.id))), 0)
@@ -266,7 +274,7 @@ class TeamCog(commands.Cog):
         spr = max(totals) - min(totals)
 
         embed = self.teams_embed(teams, ratings, assignments, preferences, mode,
-                                f"🎲 Team Roll — session: {session}")
+                                f"🎲 Team Roll — session: {session}", elo_gap)
 
         # progression couverture des paires pour CE set de joueurs
         seen, possible = await session_stats(self.bot.settings.DB_PATH, sid, [m.id for m in selected])
@@ -309,7 +317,7 @@ class TeamCog(commands.Cog):
                 "ratings": {str(uid): r for uid, r in ratings.items()},
                 "assignments": {str(uid): role for uid, role in assignments.items()},
                 "params": {"with_groups": with_groups, "avoid_pairs": avoid_pairs,
-                           "session": session, "attempts": attempts},
+                           "session": session, "attempts": attempts, "elo_gap": elo_gap},
                 "created_by": inter.user.id, "created_at": int(time.time()),
             })
         return embed, teams, ratings
@@ -351,6 +359,7 @@ class TeamCog(commands.Cog):
     @app_commands.command(name="team", description="Créer des équipes (équilibrées ou aléatoires) avec options & fallback rating.")
     @app_commands.describe(
         mode="balanced ou random (défaut: balanced)",
+        elo_gap="Écart maximal de rating moyen en balanced 5v5 (défaut 50 ; ignoré en random)",
         team_count="Nombre d'équipes (2–6, défaut 2)",
         sizes='Tailles fixées, ex: "3/3/2" (somme = nb joueurs)',
         with_groups='Groupes ensemble, ex: "@A @B | @C @D"',
@@ -371,7 +380,8 @@ class TeamCog(commands.Cog):
         members: str = "",
         create_voice: bool = False,
         channel_ttl: int = 90,
-        auto_import_riot: bool = True
+        auto_import_riot: bool = True,
+        elo_gap: app_commands.Range[float, 0] = DEFAULT_ELO_GAP
     ):
         await inter.response.defer(thinking=True)
         if team_count < 2 or team_count > 6:
@@ -410,13 +420,13 @@ class TeamCog(commands.Cog):
         preferences = await load_lane_preferences(self.bot.settings.DB_PATH, guild.id)
         try:
             teams, assignments, violations = select_teams(
-                selected, ratings, sizes_list, with_groups_list, avoid_pairs_set, preferences, mode
+                selected, ratings, sizes_list, with_groups_list, avoid_pairs_set, preferences, mode, elo_gap=elo_gap
             )
         except ValueError as exc:
             await inter.followup.send(f"❌ {exc}", ephemeral=True)
             return
         embed = self.teams_embed(teams, ratings, assignments, preferences, mode,
-                                f"🎲 Team Builder — session: {session}")
+                                f"🎲 Team Builder — session: {session}", elo_gap)
         footer = f"Mode: {mode.lower()}"
         if mode.lower() == "balanced":
             totals = [sum(ratings[m.id] for m in t) for t in teams]
@@ -442,6 +452,7 @@ class TeamCog(commands.Cog):
             members="",                      # pas de mentions
             mode=mode,
             attempts=200,
+            elo_gap=elo_gap,
             commit=True,
             selected_members=selected,       # mêmes joueurs
             sizes_list_override=sizes_list,  # mêmes tailles
@@ -481,7 +492,7 @@ class TeamCog(commands.Cog):
                 "ratings": {str(uid): float(ratings[uid]) for uid in [m.id for t in teams for m in t]},
                 "params": {
                     "with_groups": with_groups, "avoid_pairs": avoid_pairs, "members": members,
-                    "session": session, "attempts": 200
+                    "session": session, "attempts": 200, "elo_gap": elo_gap
                 },
                 "created_by": inter.user.id,
                 "created_at": int(time.time()),
@@ -528,6 +539,7 @@ class TeamCog(commands.Cog):
         avoid_pairs='Paires à séparer (ex: "@A @B ; @C @D")',
         members="(Optionnel) liste de @mentions; sinon vocal; sinon dernière config /team",
         mode="balanced (défaut) ou random",
+        elo_gap="Seuil de rating moyen en balanced 5v5 ; reprend le dernier seuil, sinon 50",
         attempts="Nombre d’essais à explorer (défaut 200)",
         commit="Sauvegarder le roll dans l’historique de session (défaut: true)",
         use_last="Ignorer le vocal et reprendre le dernier /team (défaut: false)"
@@ -544,7 +556,8 @@ class TeamCog(commands.Cog):
         mode: str = "balanced",
         attempts: int = 200,
         commit: bool = True,
-        use_last: bool = False
+        use_last: bool = False,
+        elo_gap: Optional[app_commands.Range[float, 0]] = None
     ):
         await inter.response.defer(thinking=True)
 
@@ -552,6 +565,10 @@ class TeamCog(commands.Cog):
         if not guild:
             await inter.followup.send("❌ À utiliser en serveur.", ephemeral=True)
             return
+
+        if elo_gap is None:
+            previous = await get_team_last(self.bot.settings.DB_PATH, guild.id)
+            elo_gap = (previous or {}).get("params", {}).get("elo_gap", DEFAULT_ELO_GAP)
 
         # Session auto si vide
         if not (session or "").strip():
@@ -609,6 +626,7 @@ class TeamCog(commands.Cog):
                 members=members,
                 mode=mode,
                 attempts=attempts,
+                elo_gap=elo_gap,
                 commit=commit,
                 selected_members=selected_members,
                 sizes_list_override=sizes_list_override,
@@ -621,7 +639,7 @@ class TeamCog(commands.Cog):
         params = dict(
             session=session, team_count=team_count, sizes="",
             with_groups=with_groups, avoid_pairs=avoid_pairs,
-            members=members, mode=mode, attempts=attempts, commit=commit,
+            members=members, mode=mode, attempts=attempts, commit=commit, elo_gap=elo_gap,
             selected_members=[m for t in teams for m in t], sizes_list_override=[len(t) for t in teams],
         )
         setattr(inter.client, "last_teamroll_params", params)
@@ -658,6 +676,13 @@ class TeamCog(commands.Cog):
 
         meta = snap.get("params", {})
         footer = f"Mode: {snap.get('mode','?')} • Équipes: {snap.get('team_count','?')}"
+        if snap.get("mode") == "balanced" and snap.get("sizes") == [5, 5] and "elo_gap" in meta:
+            averages = [sum(float(snap.get("ratings", {}).get(str(uid), 0)) for uid in ids) / len(ids)
+                        for ids in snap["teams"]]
+            gap = max(averages) - min(averages)
+            footer += f" • Écart moyen: {gap:.2f} / seuil: {meta['elo_gap']:g}"
+            if gap > meta["elo_gap"]:
+                footer += " • Seuil dépassé"
         if meta.get("session"):
             footer += f" • Session: {meta['session']}"
         embed.set_footer(text=footer)

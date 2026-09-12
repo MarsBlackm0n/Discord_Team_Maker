@@ -2,7 +2,7 @@ import random
 import unittest
 from types import SimpleNamespace
 
-from app.lanes import ROLES, assign_lanes, parse_roles, role_cost, select_teams, signature
+from app.lanes import ROLES, assign_lanes, parse_roles, role_cost, select_teams, signature, average_elo_gap
 
 
 class LaneTests(unittest.TestCase):
@@ -19,7 +19,7 @@ class LaneTests(unittest.TestCase):
 
     def test_both_modes_assign_one_player_per_lane_and_keep_mains(self):
         for mode in ("random", "balanced"):
-            teams, assignments, violations = self.select(mode)
+            teams, assignments, violations = self.select(mode, elo_gap=100)
             self.assertFalse(violations)
             self.assertEqual(sorted(m.id for t in teams for m in t), list(range(10)))
             for team in teams:
@@ -39,7 +39,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(a[1], b[1])
 
     def test_balanced_finds_minimum_elo_gap_without_sacrificing_mains(self):
-        teams, _, _ = self.select("balanced")
+        teams, _, _ = self.select("balanced", elo_gap=100)
         gap = abs(sum(self.ratings[m.id] for m in teams[0]) - sum(self.ratings[m.id] for m in teams[1]))
         # One of each paired main: all five pairwise rating differences are 500.
         self.assertEqual(gap, 500)
@@ -52,6 +52,45 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(score, (0, 3))
         self.assertEqual(assignment[0], "top")
         self.assertEqual(assignment[3], "bot")
+
+    def test_tight_gap_accepts_secondary_or_third_roles(self):
+        prefs = {i: [ROLES[(i + j) % 5] for j in range(3)] for i in range(10)}
+        teams, assignments, _ = self.select("balanced", preferences=prefs, elo_gap=20)
+        self.assertEqual(average_elo_gap(teams, self.ratings), 20)
+        ranks = [prefs[i].index(assignments[i]) for i in range(10)]
+        self.assertGreater(sum(ranks), 0)
+
+    def test_under_threshold_roles_win_over_smaller_gap(self):
+        teams, assignments, _ = self.select("balanced", elo_gap=100)
+        self.assertEqual(average_elo_gap(teams, self.ratings), 100)
+        self.assertTrue(all(assignments[i] == self.preferences[i][0] for i in range(10)))
+        # A gap of 20 is attainable, but unnecessary concessions should not be made.
+        tighter, _, _ = self.select("balanced", elo_gap=20)
+        self.assertEqual(average_elo_gap(tighter, self.ratings), 20)
+
+    def test_unreachable_threshold_minimises_gap_before_roles(self):
+        # The sum of ratings is 5500; team totals are multiples of 100.
+        # Best totals are 2700 / 2800, hence an average gap of 20, never zero.
+        teams, assignments, _ = self.select("balanced", elo_gap=0)
+        self.assertEqual(average_elo_gap(teams, self.ratings), 20)
+        self.assertTrue(any(assignments[i] != self.preferences[i][0] for i in range(10)))
+
+    def test_random_ignores_threshold(self):
+        random.seed(777)
+        a = self.select(elo_gap=0)
+        random.seed(777)
+        b = self.select(elo_gap=10000)
+        self.assertEqual(signature(a[0]), signature(b[0]))
+        self.assertEqual(a[1], b[1])
+
+    def test_player_groups_remain_prioritary_over_gap(self):
+        teams, _, _ = self.select("balanced", groups=[self.members[:5], self.members[5:]], elo_gap=0)
+        self.assertEqual(average_elo_gap(teams, self.ratings), 500)
+
+    def test_negative_and_nonfinite_thresholds_are_rejected(self):
+        for gap in (-1, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                self.select("balanced", elo_gap=gap)
 
     def test_unavoidable_offroles_are_distributed_evenly(self):
         prefs = {i: ["mid"] for i in range(10)}

@@ -176,16 +176,45 @@ Avec exactement deux équipes de cinq, `/team`, `/teamroll` et le bouton **Rerol
 attribuent automatiquement un TOP, JGL, MID, BOT et SUP par équipe.
 Pour les autres formats, le bot génère les équipes sans attribution de rôles.
 
-La sélection compare toutes les 126 répartitions distinctes en 5 contre 5 :
+La sélection compare toutes les 126 répartitions distinctes en 5 contre 5.
+Les groupes à garder ensemble restent obligatoires, puis le bot minimise les violations
+des paires à séparer. Parmi ces compositions, le mode `balanced` applique un seuil
+`elo_gap` sur l’écart de **rating moyen par joueur** entre les deux équipes (50 par défaut).
+Un seuil de 50 correspond donc à un écart de 250 sur les totaux des équipes de cinq.
 
-1. Respect des groupes à garder ensemble et priorité aux paires à séparer.
-2. Minimum de joueurs placés sur un rôle absent de leur liste.
-3. Minimum de concessions : premier choix = 0, deuxième = 1, puis 2, 3, 4 ; hors liste = 5.
-4. Répartition de ces concessions aussi égale que possible entre les équipes.
-5. En `balanced` uniquement : minimum d’écart entre les totaux de rating actuels.
-6. À qualité égale : préférence pour les compositions inédites, puis les paires moins jouées lors des relances ; tirage aléatoire entre ex æquo.
+Si au moins une composition respecte le seuil (écart inférieur ou égal), seules les
+compositions sous ce seuil sont comparées, dans cet ordre :
 
-Le mode `random` ignore complètement l’ELO dans la sélection et n’importe pas de rang Riot.
+1. Minimum de joueurs placés sur un rôle absent de leur liste.
+2. Minimum de concessions : premier choix = 0, deuxième = 1, puis 2, 3, 4 ; hors liste = 5.
+3. Répartition de ces concessions aussi égale que possible entre les équipes.
+4. Minimum d’écart entre les ratings moyens.
+5. À qualité égale : préférence pour les compositions inédites, puis les paires moins jouées lors des relances ; tirage aléatoire entre ex æquo.
+
+Si aucune composition ne respecte le seuil avec les contraintes prioritaires, le bot
+retient **le plus petit écart atteignable**, puis optimise les rôles et la variété.
+Le résultat affiche le seuil, l’écart réel et un avertissement si le seuil est dépassé.
+Cela peut entraîner des choix secondaires, tertiaires ou hors liste, signalés dans le résultat.
+
+```text
+/team mode:balanced elo_gap:50
+/team mode:balanced elo_gap:25
+/teamroll use_last:true elo_gap:75
+```
+
+Pour un groupe allant d’Argent à Diamant, commencer à **50** : l’échelle actuelle du bot
+place Argent IV à 1000 et Diamant IV à 1400 (hors LP). **25** privilégie davantage la proximité
+d’ELO ; **75** laisse plus de liberté aux postes. Ces valeurs sont des points de départ,
+à ajuster selon les parties, pas une calibration statistique de vos joueurs.
+
+Une valeur basse favorise un ELO proche ; une valeur plus haute laisse davantage de place
+aux préférences de rôles. `0` recherche un écart nul et, si impossible, le minimum atteignable.
+Les valeurs négatives sont refusées. `/teamroll` reprend le dernier seuil enregistré si
+l’option est omise (50 pour les anciennes configurations) ; le bouton Reroll conserve
+le seuil du tirage. `/team_last` affiche également le seuil et l’écart enregistrés.
+
+Le mode `random` ignore complètement l’ELO et `elo_gap`, optimise les rôles puis la variété,
+et n’importe pas de rang Riot. Pour les formats autres que 5v5, `elo_gap` ne s’applique pas.
 Un joueur sans préférences est attribué sans pénalité, avec la mention **préférences inconnues** :
 ce n’est pas une confirmation qu’il maîtrise tous les postes. Les rôles secondaires et les
 placements **hors préférences** sont affichés dans le résultat. Renseigner les dix profils

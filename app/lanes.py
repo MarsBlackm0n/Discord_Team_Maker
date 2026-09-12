@@ -1,8 +1,15 @@
 """Role-first team selection. Exact search for 5v5; bounded search otherwise."""
 import itertools
+import math
 import random
 
 ROLES = ("top", "jgl", "mid", "bot", "sup")
+DEFAULT_ELO_GAP = 50.0
+
+
+def average_elo_gap(teams, ratings):
+    averages = [sum(ratings[m.id] for m in team) / len(team) for team in teams]
+    return max(averages) - min(averages)
 
 
 def parse_roles(text):
@@ -38,7 +45,7 @@ def signature(teams):
 
 
 def select_teams(members, ratings, sizes, groups, avoid_pairs, preferences, mode,
-                 attempts=200, seen_signatures=None, pair_counts=None):
+                 attempts=200, seen_signatures=None, pair_counts=None, elo_gap=DEFAULT_ELO_GAP):
     from .team_logic import balance_k_teams_with_constraints
 
     mode = mode.lower()
@@ -49,6 +56,8 @@ def select_teams(members, ratings, sizes, groups, avoid_pairs, preferences, mode
     seen_signatures = seen_signatures or set()
     pair_counts = pair_counts or {}
     lane_mode = sizes == [5, 5]
+    if mode == "balanced" and lane_mode and (not math.isfinite(elo_gap) or elo_gap < 0):
+        raise ValueError("elo_gap doit être un nombre positif ou nul.")
     cache = {}
 
     def candidates():
@@ -88,8 +97,14 @@ def select_teams(members, ratings, sizes, groups, avoid_pairs, preferences, mode
         totals = [sum(ratings[m.id] for m in t) for t in teams] if mode == "balanced" else [0]
         repetition = sum(pair_counts.get(tuple(sorted((a.id, b.id))), 0)
                          for team in teams for a, b in itertools.combinations(team, 2))
-        score = (len(violations), *role_score, max(totals) - min(totals),
-                 signature(teams) in seen_signatures, repetition)
+        if mode == "balanced" and lane_mode:
+            gap = average_elo_gap(teams, ratings)
+            exceeds = gap > elo_gap
+            # Inside the threshold: roles first. Outside: smallest reachable gap first.
+            quality = (exceeds, gap if exceeds else 0, *role_score, gap)
+        else:
+            quality = (*role_score, max(totals) - min(totals))
+        score = (len(violations), *quality, signature(teams) in seen_signatures, repetition)
         if best_score is None or score < best_score:
             best_score, pool = score, [(teams, assignments, violations)]
         elif score == best_score:
