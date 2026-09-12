@@ -18,6 +18,14 @@ async def init_db(db_path: Path):
         # Important pour ON DELETE CASCADE
         await db.execute("PRAGMA foreign_keys = ON;")
 
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS lane_preferences (
+            guild_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            roles_json TEXT NOT NULL,
+            PRIMARY KEY (guild_id, user_id)
+        )""")
+
         # ---- Skills / Liens LoL / Rang LoL ----
         await db.execute("""
         CREATE TABLE IF NOT EXISTS skills (
@@ -519,6 +527,22 @@ async def get_team_last(db_path: Path, guild_id: int) -> Optional[dict]:
                 return json.loads(row[0])
             except Exception:
                 return None
+
+
+async def set_lane_preferences(db_path, guild_id: int, user_id: int, roles: list[str]):
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("""
+            INSERT INTO lane_preferences VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET roles_json=excluded.roles_json
+        """, (str(guild_id), str(user_id), json.dumps(roles)))
+        await db.commit()
+
+
+async def load_lane_preferences(db_path, guild_id: int) -> dict[int, list[str]]:
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute("SELECT user_id, roles_json FROM lane_preferences WHERE guild_id=?",
+                              (str(guild_id),)) as cur:
+            return {int(uid): json.loads(roles) for uid, roles in await cur.fetchall()}
 
 
 # =========================

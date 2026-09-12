@@ -15,49 +15,71 @@ TEMP_CHANNELS: Dict[int, Dict[int, float]] = {}
 _CLEANUP_RUNNING: Dict[int, bool] = {}
 
 
+# TTL is an inactivity delay, never a maximum lifetime for occupied channels.
+_IDLE_TTLS: Dict[int, Dict[int, float]] = {}
+_OCCUPIED: set[tuple[int, int]] = set()
+
+
+def _track_channel(guild_id: int, channel_id: int, ttl_minutes: int):
+    ttl = max(1, int(ttl_minutes)) * 60
+    TEMP_CHANNELS.setdefault(guild_id, {})[channel_id] = time.time() + ttl
+    _IDLE_TTLS.setdefault(guild_id, {})[channel_id] = ttl
+
+
+def _forget_channel(guild_id: int, channel_id: int):
+    TEMP_CHANNELS.get(guild_id, {}).pop(channel_id, None)
+    _IDLE_TTLS.get(guild_id, {}).pop(channel_id, None)
+    _OCCUPIED.discard((guild_id, channel_id))
+
+
+async def _cleanup_once(guild: discord.Guild):
+    # A disconnected cache cannot reliably tell us whether a channel is empty.
+    if guild.unavailable:
+        return
+    for cid in list(TEMP_CHANNELS.get(guild.id, {})):
+        entries = TEMP_CHANNELS.get(guild.id, {})
+        if cid not in entries:
+            continue
+        ch = guild.get_channel(cid)
+        if ch is None:
+            _forget_channel(guild.id, cid)
+            continue
+        if not isinstance(ch, discord.VoiceChannel):
+            _forget_channel(guild.id, cid)
+            continue
+        now = time.time()
+        ttl = _IDLE_TTLS.get(guild.id, {}).get(cid, 90 * 60)
+        key = (guild.id, cid)
+        if ch.members:
+            _OCCUPIED.add(key)
+            entries[cid] = now + ttl
+            continue
+        if key in _OCCUPIED:
+            _OCCUPIED.discard(key)
+            entries[cid] = now + ttl
+            continue
+        if entries[cid] > now:
+            continue
+        try:
+            await ch.delete(reason="TeamBuilder cleanup (empty channel)")
+        except discord.NotFound:
+            _forget_channel(guild.id, cid)
+        except (discord.Forbidden, discord.HTTPException):
+            # Keep tracking so a transient failure does not leak the channel.
+            entries[cid] = time.time() + 60
+        else:
+            _forget_channel(guild.id, cid)
+
+
 async def _cleanup_loop(guild: discord.Guild):
-    """Boucle de nettoyage par serveur. Supprime uniquement les salons dont l'expiration est atteinte."""
     if _CLEANUP_RUNNING.get(guild.id):
         return
     _CLEANUP_RUNNING[guild.id] = True
     try:
-        while True:
-            entries = TEMP_CHANNELS.get(guild.id, {})
-            if not entries:
-                # Rien à nettoyer -> on arrête la boucle
-                _CLEANUP_RUNNING[guild.id] = False
-                return
-
-            now = time.time()
-            # Prochaine échéance
-            next_exp = min(entries.values())
-            sleep_for = max(1.0, next_exp - now)
-            await asyncio.sleep(sleep_for)
-
-            # Après l'attente, supprime tout ce qui a expiré
-            entries = TEMP_CHANNELS.get(guild.id, {})
-            if not entries:
-                continue
-            now = time.time()
-            expired_ids = [cid for cid, exp in entries.items() if exp <= now]
-
-            for cid in expired_ids:
-                ch = guild.get_channel(cid)
-                if ch and isinstance(ch, discord.VoiceChannel):
-                    try:
-                        await ch.delete(reason="TeamBuilder cleanup (TTL)")
-                    except discord.Forbidden:
-                        pass
-                    except discord.HTTPException:
-                        pass
-                # Retire de la table, même si déjà supprimé / plus accessible
-                entries.pop(cid, None)
-
-            # Si plus rien à suivre, la boucle se terminera au prochain tour
-            if not entries:
-                TEMP_CHANNELS.pop(guild.id, None)
-    except Exception:
-        # En cas d'erreur inattendue, on libère le flag pour pouvoir relancer plus tard
+        while TEMP_CHANNELS.get(guild.id):
+            await _cleanup_once(guild)
+            await asyncio.sleep(30)
+    finally:
         _CLEANUP_RUNNING[guild.id] = False
 
 
@@ -101,8 +123,6 @@ async def _ensure_lobby_and_pin_top(
     Crée un salon 'Lobby Tournoi' si absent et remonte Lobby + base_name 1..K en haut de la catégorie.
     Détermine l'ordre : Lobby (0), puis Team 1..K (par numéro).
     """
-    import time as _time
-
     if not parent:
         return
 
@@ -122,9 +142,12 @@ async def _ensure_lobby_and_pin_top(
                 reason="Arena lobby",
             )
             # suivi TTL (dict de dicts)
-            TEMP_CHANNELS.setdefault(guild.id, {})[lobby.id] = int(_time.time()) + ttl_minutes * 60
+            _track_channel(guild.id, lobby.id, ttl_minutes)
         except discord.Forbidden:
             lobby = None  # pas bloquant
+
+    if lobby and lobby.id in TEMP_CHANNELS.get(guild.id, {}):
+        _track_channel(guild.id, lobby.id, ttl_minutes)
 
     # Récupérer tous les channels "base_name i" de la catégorie
     def team_index(ch: discord.VoiceChannel) -> int:
@@ -233,7 +256,6 @@ async def create_and_move_voice(
 
     # Prépare la map de suivi pour ce serveur
     tracked = TEMP_CHANNELS.setdefault(guild.id, {})
-    expires_at = time.time() + max(1, int(ttl_minutes)) * 60
 
     # Option réutilisation : ne chercher que dans la catégorie cible (si connue)
     existing: List[Optional[discord.VoiceChannel]] = [None] * k
@@ -253,8 +275,12 @@ async def create_and_move_voice(
                 category=parent,
                 reason="TeamBuilder create voice channel",
             )
-            tracked[ch.id] = expires_at
+            _track_channel(guild.id, ch.id, ttl_minutes)
+            asyncio.create_task(_cleanup_loop(guild))
         else:
+            # Renew before awaiting Discord, so cleanup cannot use the old deadline.
+            if ch.id in tracked:
+                _track_channel(guild.id, ch.id, ttl_minutes)
             # Réutilisation : ajuste le user_limit si nécessaire
             try:
                 if ch.user_limit != wanted_limit:
@@ -266,9 +292,12 @@ async def create_and_move_voice(
 
             # Si ce salon avait été créé par le bot auparavant et est suivi, on RESET son TTL
             if ch.id in tracked:
-                tracked[ch.id] = expires_at
+                _track_channel(guild.id, ch.id, ttl_minutes)
 
         channels.append(ch)
+
+    # Start cleanup before moves, even if a later Discord request fails.
+    asyncio.create_task(_cleanup_loop(guild))
 
     # Déplacer les joueurs
     for idx, team in enumerate(teams):

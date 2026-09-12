@@ -11,6 +11,15 @@ from discord.ext import commands
 HELP_SECTIONS = {
     "🧩 Équipes (Team Builder)": [
         {
+            "name": "/setroles",
+            "desc": "Enregistre 1 à 5 rôles par ordre de préférence. En 5v5, les rôles sont prioritaires dans les deux modes ; seul balanced utilise l’ELO. Les préférences inconnues et les placements hors préférences sont signalés. Pour un autre joueur : permission Gérer le serveur.",
+            "examples": ["/setroles first_role:mid second_role:top third_role:jgl"],
+        },
+        {
+            "name": "/roles",
+            "desc": "Affiche tes préférences de rôles, ou celles de user:@Joueur.",
+        },
+        {
             "name": "/team",
             "desc": (
                 "Créer des équipes **équilibrées** (par défaut) ou **aléatoires** à partir des joueurs "
@@ -30,7 +39,7 @@ HELP_SECTIONS = {
         {
             "name": "/teamroll",
             "desc": (
-                "Génère une nouvelle combinaison **inédite** d'équipes en évitant les paires déjà vues "
+                "Favorise une combinaison différente à qualité de rôles et d’équilibre égale, en évitant les paires déjà vues "
                 "sur la **session** en cours. Fallback: si pas de mentions et pas de vocal, reprend la "
                 "dernière config `/team` (mêmes joueurs et tailles).\n"
                 "🎛️ Paramètres utiles : `session` (si vide → `auto-YYYYMMDD`), `attempts`, `mode` (balanced/random). "
@@ -49,12 +58,12 @@ HELP_SECTIONS = {
             "name": "/move",
             "desc": (
                 "Crée/réutilise les salons vocaux **Team 1..K** et **déplace** les joueurs selon la **dernière config**. "
-                "Option : `channel_ttl` (durée de vie des salons)."
+                "Option : `channel_ttl` (minutes sans joueur avant suppression ; les salons occupés sont conservés)."
             ),
         },
         {
             "name": "/disbandteams",
-            "desc": "Supprime les **salons vocaux temporaires** créés via `/team create_voice:true` ou `/move`.",
+            "desc": "Supprime les **salons vocaux temporaires vides** créés via `/team create_voice:true` ou `/move`.",
         },
         {
             "name": "/move",

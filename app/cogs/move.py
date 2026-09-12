@@ -21,7 +21,7 @@ class MoveCog(commands.Cog):
     )
 
     @app_commands.describe(
-        channel_ttl="Durée de vie des salons (minutes, défaut 90)",
+        channel_ttl="Délai sans joueur avant suppression (minutes, défaut 90)",
         reuse_existing="Réutiliser des salons 'Team 1', 'Team 2' existants si présents (si ton voice.py le gère)"
     )
     async def move(self, inter: discord.Interaction, channel_ttl: int = 90, reuse_existing: bool = True):

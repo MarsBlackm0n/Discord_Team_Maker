@@ -1,8 +1,7 @@
 # app/cogs/team.py
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Literal
 import itertools
 import time
-import random
 from datetime import datetime
 
 import discord
@@ -11,6 +10,7 @@ from discord.ext import commands
 
 from ..db import (
     get_rating, set_rating, set_team_last, get_team_last,
+    load_lane_preferences, set_lane_preferences,
     get_or_create_session_id, load_pair_counts, bump_pair_counts, session_stats, end_session,
     load_team_signatures, add_team_signature, clear_team_signatures, prune_team_signatures
 )
@@ -23,14 +23,81 @@ except Exception:
 
 from ..team_logic import (
     parse_mentions, parse_sizes, group_by_with_constraints,
-    parse_avoid_pairs, split_random, balance_k_teams_with_constraints, fmt_team
+    parse_avoid_pairs
 )
 from ..voice import create_and_move_voice
+from ..lanes import ROLES, parse_roles, select_teams, format_player, signature
 
 
 class TeamCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        from ..voice import TEMP_CHANNELS, _IDLE_TTLS, _track_channel
+        if before.channel == after.channel:
+            return
+        for channel in (before.channel, after.channel):
+            if channel and channel.id in TEMP_CHANNELS.get(member.guild.id, {}):
+                ttl = _IDLE_TTLS.get(member.guild.id, {}).get(channel.id, 90 * 60)
+                _track_channel(member.guild.id, channel.id, int(ttl / 60))
+
+    @app_commands.command(name="setroles", description="Enregistrer tes rôles LoL par ordre de préférence (1 à 5).")
+    @app_commands.guild_only()
+    @app_commands.describe(first_role="Rôle principal", second_role="Deuxième choix",
+                           third_role="Troisième choix", fourth_role="Quatrième choix",
+                           fifth_role="Cinquième choix", user="Autre joueur (Gérer le serveur requis)")
+    async def setroles(
+        self, inter: discord.Interaction,
+        first_role: Literal["top", "jgl", "mid", "bot", "sup"],
+        second_role: Optional[Literal["top", "jgl", "mid", "bot", "sup"]] = None,
+        third_role: Optional[Literal["top", "jgl", "mid", "bot", "sup"]] = None,
+        fourth_role: Optional[Literal["top", "jgl", "mid", "bot", "sup"]] = None,
+        fifth_role: Optional[Literal["top", "jgl", "mid", "bot", "sup"]] = None,
+        user: Optional[discord.Member] = None,
+    ):
+        target = user or inter.user
+        if target.id != inter.user.id and not inter.user.guild_permissions.manage_guild:
+            await inter.response.send_message("⛔ Gérer le serveur est requis pour modifier un autre joueur.", ephemeral=True)
+            return
+        try:
+            roles = parse_roles(" ".join(r for r in (first_role, second_role, third_role, fourth_role, fifth_role) if r))
+        except ValueError as exc:
+            await inter.response.send_message(str(exc), ephemeral=True)
+            return
+        await inter.response.defer(ephemeral=True)
+        await set_lane_preferences(self.bot.settings.DB_PATH, inter.guild.id, target.id, roles)
+        await inter.followup.send(f"✅ {target.display_name} : " + " → ".join(r.upper() for r in roles), ephemeral=True)
+
+    @app_commands.command(name="roles", description="Afficher les préférences de rôles d'un joueur.")
+    @app_commands.guild_only()
+    async def roles(self, inter: discord.Interaction, user: Optional[discord.Member] = None):
+        await inter.response.defer(ephemeral=True)
+        target = user or inter.user
+        preferences = await load_lane_preferences(self.bot.settings.DB_PATH, inter.guild.id)
+        roles = preferences.get(target.id, [])
+        text = " → ".join(r.upper() for r in roles) if roles else "Aucune préférence enregistrée. Utilise /setroles."
+        await inter.followup.send(f"**{target.display_name}** : {text}", ephemeral=True)
+
+    @staticmethod
+    def teams_embed(teams, ratings, assignments, preferences, mode, title):
+        balanced = mode.lower() == "balanced"
+        embed = discord.Embed(title=title, color=discord.Color.blurple())
+        embed.description = (
+            "Un joueur par rôle • priorité aux préférences, puis à leur répartition entre équipes."
+            if assignments else "Attribution des rôles disponible pour deux équipes de 5 joueurs."
+        )
+        if assignments and any(not preferences.get(m.id) for t in teams for m in t):
+            embed.description += "\nPréférences inconnues : aucune pénalité de rôle ; renseignez /setroles."
+        for idx, team in enumerate(teams, 1):
+            ordered = sorted(team, key=lambda m: ROLES.index(assignments[m.id])) if assignments else team
+            lines = [format_player(m, ratings, assignments, preferences, balanced) for m in ordered]
+            name = f"Team {idx}"
+            if balanced:
+                name += f" — total {int(sum(ratings[m.id] for m in team))}"
+            embed.add_field(name=name, value="\n".join(lines) or "_(vide)_", inline=True)
+        return embed
 
     # -------- Helpers --------
     async def ensure_ratings_for_members(
@@ -165,7 +232,7 @@ class TeamCog(commands.Cog):
 
         # 2) Ratings + tailles + contraintes
         ratings, used_default, imported_from_riot = await self.ensure_ratings_for_members(
-            selected, auto_import_riot=True
+            selected, auto_import_riot=(mode.lower() == "balanced")
         )
 
         if sizes_list_override is not None:
@@ -187,78 +254,29 @@ class TeamCog(commands.Cog):
             self.bot.settings.DB_PATH, guild.id, session, players_fp, sizes_fp
         )
 
-        def penalty(teams: List[List[discord.Member]]) -> Tuple[int, int]:
-            """Retourne (penalty_repetition, spread_totals)."""
-            rep = 0
-            for t in teams:
-                ids = sorted(m.id for m in t)
-                for a, b in itertools.combinations(ids, 2):
-                    rep += pair_counts.get((a, b), 0)
-            totals = [int(sum(ratings[m.id] for m in t)) for t in teams]
-            spread = max(totals) - min(totals) if totals else 0
-            return rep, spread
+        preferences = await load_lane_preferences(self.bot.settings.DB_PATH, guild.id)
+        teams, assignments, violations = select_teams(
+            selected, ratings, sizes_list, with_groups_list, avoid_pairs_set,
+            preferences, mode, attempts, seen_signatures, pair_counts,
+        )
+        exhausted = signature(teams) in seen_signatures
+        rep = sum(pair_counts.get(tuple(sorted((a.id, b.id))), 0)
+                  for t in teams for a, b in itertools.combinations(t, 2))
+        totals = [sum(ratings[m.id] for m in t) for t in teams]
+        spr = max(totals) - min(totals)
 
-        # 4) Recherche (inédit prioritaire) + diversité quand tout est vu
-        BEST: Optional[tuple[int, int, List[List[discord.Member]]]] = None
-        BEST_UNSEEN: Optional[List[List[discord.Member]]] = None
-        TOP_POOL: list[List[List[discord.Member]]] = []  # ex æquo au meilleur score
-        attempts = max(50, min(5000, int(attempts)))
-
-        for _ in range(attempts):
-            base = selected[:]
-            random.shuffle(base)  # casse la déterminisme d’entrée
-
-            if mode.lower() == "random":
-                cand = split_random(base, team_count, sizes_list)
-            else:
-                cand, _viol = balance_k_teams_with_constraints(
-                    base, ratings, team_count, sizes_list, with_groups_list, avoid_pairs_set
-                )
-
-            sig = self._composition_signature(cand)
-            if sig not in seen_signatures and BEST_UNSEEN is None:
-                BEST_UNSEEN = cand  # 1ère inédite trouvée
-
-            rep, spr = penalty(cand)
-            if (BEST is None) or (rep, spr) < (BEST[0], BEST[1]):
-                BEST = (rep, spr, cand)
-                TOP_POOL = [cand]
-            elif BEST is not None and (rep, spr) == (BEST[0], BEST[1]):
-                TOP_POOL.append(cand)
-
-            if BEST_UNSEEN is not None and rep == 0:
-                break  # jackpot: inédite + rep==0
-
-        if BEST is None:
-            raise RuntimeError("Impossible de générer des équipes.")
-
-        if BEST_UNSEEN is not None:
-            teams = BEST_UNSEEN
-            exhausted = False
-            rep, spr = penalty(teams)
-        else:
-            # EPUISE : on varie parmi les meilleures candidates
-            exhausted = True
-            pool = TOP_POOL or ([BEST[2]] if BEST else [])
-            teams = random.choice(pool)
-            rep, spr = penalty(teams)
-
-        # 5) Affichage
-        embed = discord.Embed(title=f"🎲 Team Roll — session: {session}", color=discord.Color.blurple())
-        for idx, team_list in enumerate(teams):
-            lines = [f"- {m.display_name} ({int(ratings[m.id])})" for m in team_list]
-            total = int(sum(ratings[m.id] for m in team_list))
-            embed.add_field(
-                name=f"Team {idx+1} — total {total}",
-                value=("\n".join(lines) if lines else "_(vide)_"),
-                inline=True
-            )
+        embed = self.teams_embed(teams, ratings, assignments, preferences, mode,
+                                f"🎲 Team Roll — session: {session}")
 
         # progression couverture des paires pour CE set de joueurs
         seen, possible = await session_stats(self.bot.settings.DB_PATH, sid, [m.id for m in selected])
-        footer = f"Répétitions évitées: {max(0, rep)} • Δ totals: {spr} • Couverture paires: {seen}/{possible}"
+        footer = f"Paires déjà jouées: {rep} • Couverture paires: {seen}/{possible}"
+        if mode.lower() == "balanced":
+            footer += f" • Δ totals: {int(spr)}"
+        if violations:
+            footer += f" • Contraintes violées: {len(violations)}"
         if exhausted:
-            footer += " • ♻️ Espace épuisé: tirage varié (historique non bloquant)"
+            footer += " • ♻️ Composition déjà jouée : priorité à la qualité des équipes"
         embed.set_footer(text=footer)
 
         # 6) Commit dans l’historique (optionnel)
@@ -284,6 +302,16 @@ class TeamCog(commands.Cog):
             except Exception:
                 pass
 
+        if commit:
+            await set_team_last(self.bot.settings.DB_PATH, guild.id, {
+                "mode": mode.lower(), "team_count": team_count, "sizes": sizes_list,
+                "teams": [[m.id for m in t] for t in teams],
+                "ratings": {str(uid): r for uid, r in ratings.items()},
+                "assignments": {str(uid): role for uid, role in assignments.items()},
+                "params": {"with_groups": with_groups, "avoid_pairs": avoid_pairs,
+                           "session": session, "attempts": attempts},
+                "created_by": inter.user.id, "created_at": int(time.time()),
+            })
         return embed, teams, ratings
 
     # -------- View: bouton Reroll (persistant) --------
@@ -329,7 +357,7 @@ class TeamCog(commands.Cog):
         avoid_pairs='Paires à séparer, ex: "@A @B ; @C @D"',
         members="(Optionnel) liste de @mentions si pas de vocal)",
         create_voice="Créer des salons vocaux Team 1..K et déplacer les joueurs",
-        channel_ttl="Durée de vie des salons vocaux (minutes, défaut 90)",
+        channel_ttl="Délai de suppression après inoccupation des salons (minutes, défaut 90)",
         auto_import_riot="Importer via Riot pour les joueurs liés si possible (défaut: true)",
     )
     async def team(
@@ -352,7 +380,10 @@ class TeamCog(commands.Cog):
         
         session = f"auto-{datetime.utcnow().strftime('%Y%m%d')}"
         guild = inter.guild
-        author = guild and guild.get_member(inter.user.id)
+        if not guild:
+            await inter.followup.send("À utiliser sur un serveur.", ephemeral=True)
+            return
+        author = guild.get_member(inter.user.id)
 
         # Collecte joueurs
         if members:
@@ -369,31 +400,37 @@ class TeamCog(commands.Cog):
             return
 
         ratings, used_default, imported_from_riot = await self.ensure_ratings_for_members(
-            selected, auto_import_riot
+            selected, auto_import_riot and mode.lower() == "balanced"
         )
 
         sizes_list = parse_sizes(sizes, len(selected), team_count)
         with_groups_list = group_by_with_constraints(guild, selected, with_groups) if with_groups else [[m] for m in selected]
         avoid_pairs_set = parse_avoid_pairs(guild, avoid_pairs)
 
-        if mode.lower() == "random":
-            teams = split_random(selected, team_count, sizes_list)
-            violations: List[Tuple[int, int]] = []
-        else:
-            teams, violations = balance_k_teams_with_constraints(
-                selected, ratings, team_count, sizes_list, with_groups_list, avoid_pairs_set
+        preferences = await load_lane_preferences(self.bot.settings.DB_PATH, guild.id)
+        try:
+            teams, assignments, violations = select_teams(
+                selected, ratings, sizes_list, with_groups_list, avoid_pairs_set, preferences, mode
             )
-
-        # Embed + bouton Reroll (en un seul envoi)
-        embed = discord.Embed(title=f"🎲 Team Builder — session: {session}", color=discord.Color.blurple())
-        for idx, team_list in enumerate(teams):
-            embed.add_field(name="\u200b", value=fmt_team(team_list, ratings, idx), inline=True)
-        totals = [int(sum(ratings[m.id] for m in t)) for t in teams]
-        spread = (max(totals) - min(totals)) if totals else 0
-        footer = f"Mode: {'Équilibré' if mode.lower()!='random' else 'Aléatoire'} • Δ total: {spread}"
+        except ValueError as exc:
+            await inter.followup.send(f"❌ {exc}", ephemeral=True)
+            return
+        embed = self.teams_embed(teams, ratings, assignments, preferences, mode,
+                                f"🎲 Team Builder — session: {session}")
+        footer = f"Mode: {mode.lower()}"
+        if mode.lower() == "balanced":
+            totals = [sum(ratings[m.id] for m in t) for t in teams]
+            footer += f" • Δ total: {int(max(totals) - min(totals))}"
         if violations:
             footer += f" • Contraintes violées: {len(violations)}"
         embed.set_footer(text=footer)
+
+        # Include the initial composition in the history used by Reroll.
+        sid = await get_or_create_session_id(self.bot.settings.DB_PATH, guild.id, session)
+        await bump_pair_counts(self.bot.settings.DB_PATH, sid, [[m.id for m in t] for t in teams])
+        await add_team_signature(self.bot.settings.DB_PATH, guild.id, session,
+                                 self._players_fingerprint(selected), self._sizes_fingerprint(sizes_list),
+                                 signature(teams), int(time.time()))
 
         # Prépare les params pour un Reroll identique (mêmes joueurs/tailles) — session auto
         params = dict(
@@ -418,7 +455,7 @@ class TeamCog(commands.Cog):
         notes = []
         if imported_from_riot:
             notes.append("🏷️ Import Riot: " + ", ".join(m.display_name for m in imported_from_riot))
-        if used_default:
+        if used_default and mode.lower() == "balanced":
             notes.append("⚠️ Rating par défaut (1000): " + ", ".join(m.display_name for m in used_default) +
                          "\n→ `/setrank` ou `/setskill`, ou `/linklol`.")
         if notes:
@@ -437,6 +474,7 @@ class TeamCog(commands.Cog):
         try:
             snapshot = {
                 "mode": mode.lower(),
+                "assignments": {str(uid): role for uid, role in assignments.items()},
                 "team_count": team_count,
                 "sizes": sizes_list,
                 "teams": [[m.id for m in t] for t in teams],
@@ -455,22 +493,30 @@ class TeamCog(commands.Cog):
     # -------- /disbandteams --------
     @app_commands.command(name="disbandteams", description="Supprimer les salons vocaux d'équipe temporaires.")
     async def disbandteams(self, inter: discord.Interaction):
-        from ..voice import TEMP_CHANNELS
+        from ..voice import TEMP_CHANNELS, _forget_channel
         guild = inter.guild
         if not guild:
             await inter.response.send_message("❌ Guild inconnue.", ephemeral=True)
             return
-        ids = TEMP_CHANNELS.pop(guild.id, [])
+        await inter.response.defer(ephemeral=True)
+        ids = list(TEMP_CHANNELS.get(guild.id, {}))
         count = 0
+        occupied = 0
         for cid in ids:
             ch = guild.get_channel(cid)
+            if ch and ch.members:
+                occupied += 1
+                continue
             if ch:
                 try:
                     await ch.delete(reason="TeamBuilder manual cleanup")
                     count += 1
-                except discord.Forbidden:
+                except discord.NotFound:
                     pass
-        await inter.response.send_message(f"🧹 Salons supprimés: {count}", ephemeral=True)
+                except (discord.Forbidden, discord.HTTPException):
+                    continue
+            _forget_channel(guild.id, cid)
+        await inter.followup.send(f"🧹 Salons supprimés: {count} • Salons occupés conservés: {occupied}", ephemeral=True)
 
     # -------- /teamroll --------
     @app_commands.command(name="teamroll", description="Relance un tirage à partir de la DERNIÈRE config /team (fallback auto), en évitant les répétitions.")
@@ -571,36 +617,12 @@ class TeamCog(commands.Cog):
             await inter.followup.send(f"❌ {e}", ephemeral=True)
             return
 
-        # Sauvegarde "dernière config" (serveur)
-        try:
-            if sizes_list_override is not None:
-                sizes_list = sizes_list_override
-            else:
-                sizes_list = parse_sizes(sizes, sum(len(t) for t in teams), team_count)
-
-            snapshot = {
-                "mode": mode.lower(),
-                "team_count": team_count,
-                "sizes": sizes_list,
-                "teams": [[m.id for m in t] for t in teams],
-                "ratings": {str(uid): float(ratings[uid]) for uid in [m.id for t in teams for m in t]},
-                "params": {
-                    "with_groups": with_groups, "avoid_pairs": avoid_pairs, "members": members,
-                    "session": params["session"], "attempts": attempts
-                },
-                "created_by": inter.user.id,
-                "created_at": int(time.time()),
-            }
-            await set_team_last(self.bot.settings.DB_PATH, guild.id, snapshot)
-        except Exception:
-            pass
-
         # Bouton Reroll avec les mêmes paramètres (+ stock global simple)
         params = dict(
-            session=f"auto-{datetime.utcnow().strftime('%Y%m%d')}", team_count=team_count, sizes=sizes,
+            session=session, team_count=team_count, sizes="",
             with_groups=with_groups, avoid_pairs=avoid_pairs,
             members=members, mode=mode, attempts=attempts, commit=commit,
-            selected_members=selected_members, sizes_list_override=sizes_list_override,
+            selected_members=[m for t in teams for m in t], sizes_list_override=[len(t) for t in teams],
         )
         setattr(inter.client, "last_teamroll_params", params)
 
@@ -620,15 +642,19 @@ class TeamCog(commands.Cog):
         embed = discord.Embed(title="🗂️ Dernière config d'équipes", color=discord.Color.green())
         for idx, team_ids in enumerate(snap.get("teams", []), start=1):
             names = []
+            assignments = snap.get("assignments", {})
             for uid in team_ids:
                 member = ids_to_members.get(int(uid))
                 if member:
                     rating = int(float(snap.get("ratings", {}).get(str(uid), 0)))
-                    names.append(f"- {member.display_name} ({rating})")
+                    role = assignments.get(str(uid))
+                    label = f"**{role.upper()}** — " if role else ""
+                    rating_label = f" ({rating})" if snap.get("mode") != "random" else ""
+                    names.append(f"- {label}{member.display_name}{rating_label}")
                 else:
                     names.append(f"- (id:{uid})")
             total = sum(int(float(snap.get("ratings", {}).get(str(uid), 0))) for uid in team_ids)
-            embed.add_field(name=f"Team {idx} — total {total}", value="\n".join(names) or "_(vide)_", inline=True)
+            embed.add_field(name=(f"Team {idx} — total {total}" if snap.get("mode") != "random" else f"Team {idx}"), value="\n".join(names) or "_(vide)_", inline=True)
 
         meta = snap.get("params", {})
         footer = f"Mode: {snap.get('mode','?')} • Équipes: {snap.get('team_count','?')}"
