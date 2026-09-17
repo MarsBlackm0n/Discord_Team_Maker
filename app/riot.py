@@ -24,6 +24,14 @@ TIER_BASE = {
 }
 DIV_BONUS = {"IV":0,"III":20,"II":40,"I":60}
 
+# Sans ceci, aiohttp attend jusqu'à 5 minutes (défaut) avant d'abandonner une requête muette,
+# laissant l'interaction Discord bloquée sur "réfléchit..." bien après le délai raisonnable.
+_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
+
+def _new_session() -> aiohttp.ClientSession:
+    return aiohttp.ClientSession(timeout=_HTTP_TIMEOUT)
+
 
 def rank_to_rating(tier: str, division: Optional[str], lp: int) -> float:
     base = TIER_BASE.get((tier or "").upper(), 1000)
@@ -66,17 +74,22 @@ def parse_riot_id(raw: str) -> Tuple[str, str]:
 
 
 async def _get_json(session: aiohttp.ClientSession, url: str, headers: dict):
-    async with session.get(url, headers=headers) as r:
-        if r.status == 200:
-            return await r.json()
-        if r.status in (401, 403):
-            raise RiotKeyInvalid(r.status, "Clé Riot manquante, invalide ou expirée.")
-        if r.status == 404:
-            raise RiotNotFound(r.status, "Introuvable côté Riot.")
-        if r.status == 429:
-            retry_after = float(r.headers.get("Retry-After", "1") or "1")
-            raise RiotRateLimited(retry_after)
-        raise RiotApiError(r.status, f"Erreur Riot API (HTTP {r.status}).")
+    try:
+        async with session.get(url, headers=headers) as r:
+            if r.status == 200:
+                return await r.json()
+            if r.status in (401, 403):
+                raise RiotKeyInvalid(r.status, "Clé Riot manquante, invalide ou expirée.")
+            if r.status == 404:
+                raise RiotNotFound(r.status, "Introuvable côté Riot.")
+            if r.status == 429:
+                retry_after = float(r.headers.get("Retry-After", "1") or "1")
+                raise RiotRateLimited(retry_after)
+            raise RiotApiError(r.status, f"Erreur Riot API (HTTP {r.status}).")
+    except asyncio.TimeoutError:
+        raise RiotApiError(0, "Riot API : délai d'attente dépassé (réseau ou service indisponible).")
+    except aiohttp.ClientError as exc:
+        raise RiotApiError(0, f"Riot API : erreur réseau ({exc}).")
 
 
 async def fetch_puuid_by_riot_id(riot_key: str, region_code: str, game_name: str, tag_line: str) -> str:
@@ -86,7 +99,7 @@ async def fetch_puuid_by_riot_id(riot_key: str, region_code: str, game_name: str
         raise ValueError(f"Région inconnue : {region_code}")
     headers = {"X-Riot-Token": riot_key}
     url = f"https://{continent}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{game_name}/{tag_line}"
-    async with aiohttp.ClientSession() as session:
+    async with _new_session() as session:
         data = await _get_json(session, url, headers)
     puuid = data.get("puuid")
     if not puuid:
@@ -103,7 +116,7 @@ async def fetch_lol_rank_by_puuid(
         raise ValueError(f"Région inconnue : {region_code}")
     headers = {"X-Riot-Token": riot_key}
     url = f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
-    async with aiohttp.ClientSession() as session:
+    async with _new_session() as session:
         entries = await _get_json(session, url, headers)
     chosen = next((e for e in entries if e.get("queueType") == "RANKED_SOLO_5x5"), None)
     if not chosen:
@@ -166,7 +179,7 @@ async def fetch_recent_role_counts(
     ids_url = f"{base}/lol/match/v5/matches/by-puuid/{puuid}/ids?queue={RANKED_SOLO_QUEUE_ID}&count={int(count)}"
 
     counts: Dict[str, int] = {}
-    async with aiohttp.ClientSession() as session:
+    async with _new_session() as session:
         match_ids: List[str] = await _get_json(session, ids_url, headers)
         for match_id in match_ids:
             detail = await _get_json(session, f"{base}/lol/match/v5/matches/{match_id}", headers)
