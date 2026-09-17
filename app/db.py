@@ -37,8 +37,11 @@ async def init_db(db_path: Path):
         CREATE TABLE IF NOT EXISTS lol_links (
             user_id TEXT PRIMARY KEY,
             summoner_name TEXT NOT NULL,
-            region TEXT NOT NULL
+            region TEXT NOT NULL,
+            tag_line TEXT NOT NULL DEFAULT '',
+            puuid TEXT NOT NULL DEFAULT ''
         )""")
+        await _ensure_lol_links_columns(db)
 
         await db.execute("""
         CREATE TABLE IF NOT EXISTS lol_rank (
@@ -130,6 +133,16 @@ async def init_db(db_path: Path):
 
         await db.commit()
 
+async def _ensure_lol_links_columns(db: aiosqlite.Connection):
+    """Migration légère : ajoute tag_line/puuid si la table lol_links existait avant leur introduction."""
+    cur = await db.execute("PRAGMA table_info(lol_links);")
+    cols = [r[1] for r in await cur.fetchall()]
+    if "tag_line" not in cols:
+        await db.execute("ALTER TABLE lol_links ADD COLUMN tag_line TEXT NOT NULL DEFAULT '';")
+    if "puuid" not in cols:
+        await db.execute("ALTER TABLE lol_links ADD COLUMN puuid TEXT NOT NULL DEFAULT '';")
+
+
 # --- helpers JSON sûrs (si pas déjà dans ton fichier)
 def _json_dump(x) -> str:
     return json.dumps(x, separators=(",", ":"), ensure_ascii=False)
@@ -193,20 +206,30 @@ async def set_rating(db_path: Path, user_id: int, rating: float):
 # =========================
 # Repos Liens LoL
 # =========================
-async def get_linked_lol(db_path: Path, user_id: int) -> Optional[Tuple[str, str]]:
+async def get_linked_lol(db_path: Path, user_id: int) -> Optional[Tuple[str, str, str, str]]:
+    """Renvoie (game_name, region, tag_line, puuid) ou None si pas de lien."""
     async with aiosqlite.connect(db_path) as db:
-        async with db.execute("SELECT summoner_name, region FROM lol_links WHERE user_id=?", (str(user_id),)) as cur:
+        async with db.execute(
+            "SELECT summoner_name, region, tag_line, puuid FROM lol_links WHERE user_id=?", (str(user_id),)
+        ) as cur:
             row = await cur.fetchone()
-            return (row[0], row[1]) if row else None
+            return (row[0], row[1], row[2], row[3]) if row else None
 
 
-async def link_lol(db_path: Path, user_id: int, summoner: str, region: str):
+async def link_lol(db_path: Path, user_id: int, game_name: str, tag_line: str, region: str, puuid: str = ""):
     async with aiosqlite.connect(db_path) as db:
         await db.execute(
-            "INSERT INTO lol_links(user_id, summoner_name, region) VALUES(?, ?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET summoner_name=excluded.summoner_name, region=excluded.region",
-            (str(user_id), summoner, region),
+            "INSERT INTO lol_links(user_id, summoner_name, region, tag_line, puuid) VALUES(?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET summoner_name=excluded.summoner_name, region=excluded.region, "
+            "tag_line=excluded.tag_line, puuid=excluded.puuid",
+            (str(user_id), game_name, region, tag_line, puuid),
         )
+        await db.commit()
+
+
+async def set_lol_puuid(db_path: Path, user_id: int, puuid: str):
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("UPDATE lol_links SET puuid=? WHERE user_id=?", (puuid, str(user_id)))
         await db.commit()
 
 
@@ -230,6 +253,18 @@ async def set_lol_rank(
           lp=excluded.lp, updated_at=excluded.updated_at
         """, (str(user_id), source, tier.upper(), division, int(lp or 0), int(time.time())))
         await db.commit()
+
+
+async def get_lol_rank_meta(db_path: Path, user_id: int) -> Optional[dict]:
+    """Renvoie {source, tier, division, lp, updated_at} pour connaître la fraîcheur d'un rang importé."""
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute(
+            "SELECT source, tier, division, lp, updated_at FROM lol_rank WHERE user_id=?", (str(user_id),)
+        ) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return {"source": row[0], "tier": row[1], "division": row[2], "lp": row[3], "updated_at": row[4]}
 
 
 async def fetch_all_ratings_and_links(

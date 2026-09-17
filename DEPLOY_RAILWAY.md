@@ -30,6 +30,11 @@ Ce dépôt est prêt pour un déploiement **Railway**. On utilise un **Volume** 
 - *(optionnel)* `RIOT_API_KEY=...` (sinon le bot fonctionne en **offline** pour LoL)
 - *(recommandé)* `PYTHON_VERSION=3.11.9`
 
+> ⚠️ Une **clé de développement** générée sur le [Developer Portal](https://developer.riotgames.com/) expire au
+> bout de **24h** : il faudra régénérer `RIOT_API_KEY` sur Railway régulièrement. Sans clé valide, `/linklol`,
+> `/syncrank` et l'auto-import répondent simplement par un message d'erreur — le reste du bot continue de
+> fonctionner normalement (rating manuel via `/setrank`/`/setskill`).
+
 > Astuce : récupérez votre **User ID** avec `/whoami`.
 
 ---
