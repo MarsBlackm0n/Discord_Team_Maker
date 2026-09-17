@@ -4,9 +4,18 @@ from typing import Optional, Tuple
 import aiohttp
 
 PLATFORM_MAP = {
-    "EUW":"euw1","EUNE":"eun1","NA":"na1","KR":"kr","BR":"br1",
-    "JP":"jp1","LAN":"la1","LAS":"la2","OCE":"oc1","TR":"tr1","RU":"ru",
+    "EUW": "euw1", "EUNE": "eun1", "NA": "na1", "KR": "kr", "BR": "br1",
+    "JP": "jp1", "LAN": "la1", "LAS": "la2", "OCE": "oc1", "TR": "tr1", "RU": "ru",
 }
+
+# Routing continental pour l'API Account-v1 (par région de jeu, pas par plateforme).
+REGION_TO_CONTINENT = {
+    "EUW": "europe", "EUNE": "europe", "TR": "europe", "RU": "europe",
+    "NA": "americas", "BR": "americas", "LAN": "americas", "LAS": "americas",
+    "KR": "asia", "JP": "asia",
+    "OCE": "sea",
+}
+
 TIER_BASE = {
     "IRON":800,"BRONZE":900,"SILVER":1000,"GOLD":1100,
     "PLATINUM":1200,"EMERALD":1300,"DIAMOND":1400,
@@ -14,29 +23,110 @@ TIER_BASE = {
 }
 DIV_BONUS = {"IV":0,"III":20,"II":40,"I":60}
 
+
 def rank_to_rating(tier: str, division: Optional[str], lp: int) -> float:
     base = TIER_BASE.get((tier or "").upper(), 1000)
     bonus = DIV_BONUS.get((division or "").upper(), 0)
     lp_bonus = max(0, min(int(lp or 0), 100)) * 0.5
     return base + bonus + lp_bonus
 
-async def fetch_lol_rank_info(riot_key: Optional[str], region_code: str, summoner_name: str) -> Optional[Tuple[str, Optional[str], int, float]]:
-    if not riot_key: return None
+
+class RiotApiError(Exception):
+    """Erreur Riot API générique, porte le code HTTP reçu."""
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+class RiotKeyInvalid(RiotApiError):
+    """Clé Riot manquante, invalide ou expirée (401/403)."""
+
+
+class RiotNotFound(RiotApiError):
+    """Riot ID ou compte introuvable (404)."""
+
+
+class RiotRateLimited(RiotApiError):
+    """Trop de requêtes (429). `retry_after` est en secondes."""
+    def __init__(self, retry_after: float):
+        super().__init__(429, f"Riot API : rate limité, réessayer dans {retry_after:.0f}s")
+        self.retry_after = retry_after
+
+
+def parse_riot_id(raw: str) -> Tuple[str, str]:
+    """'Pseudo#TAG' -> ('Pseudo', 'TAG'). Lève ValueError si le format est invalide."""
+    if "#" not in raw:
+        raise ValueError("Format attendu : Pseudo#TAG (Riot ID complet, visible dans le client LoL).")
+    game_name, _, tag_line = raw.partition("#")
+    game_name, tag_line = game_name.strip(), tag_line.strip()
+    if not game_name or not tag_line:
+        raise ValueError("Format attendu : Pseudo#TAG (Riot ID complet, visible dans le client LoL).")
+    return game_name, tag_line
+
+
+async def _get_json(session: aiohttp.ClientSession, url: str, headers: dict):
+    async with session.get(url, headers=headers) as r:
+        if r.status == 200:
+            return await r.json()
+        if r.status in (401, 403):
+            raise RiotKeyInvalid(r.status, "Clé Riot manquante, invalide ou expirée.")
+        if r.status == 404:
+            raise RiotNotFound(r.status, "Introuvable côté Riot.")
+        if r.status == 429:
+            retry_after = float(r.headers.get("Retry-After", "1") or "1")
+            raise RiotRateLimited(retry_after)
+        raise RiotApiError(r.status, f"Erreur Riot API (HTTP {r.status}).")
+
+
+async def fetch_puuid_by_riot_id(riot_key: str, region_code: str, game_name: str, tag_line: str) -> str:
+    """Account-v1 : Riot ID -> PUUID. Lève RiotApiError (voir sous-classes) en cas d'échec."""
+    continent = REGION_TO_CONTINENT.get((region_code or "").upper())
+    if not continent:
+        raise ValueError(f"Région inconnue : {region_code}")
     headers = {"X-Riot-Token": riot_key}
-    base = f"https://{region_code}.api.riotgames.com"
+    url = f"https://{continent}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{game_name}/{tag_line}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"{base}/lol/summoner/v4/summoners/by-name/{summoner_name}", headers=headers) as r:
-            if r.status != 200: return None
-            summ = await r.json()
-        summ_id = summ.get("id")
-        if not summ_id: return None
-        async with session.get(f"{base}/lol/league/v4/entries/by-summoner/{summ_id}", headers=headers) as r:
-            if r.status != 200: return None
-            entries = await r.json()
-    chosen = next((e for e in entries if e.get("queueType")=="RANKED_SOLO_5x5"), entries[0] if entries else None)
-    if not chosen: return None
+        data = await _get_json(session, url, headers)
+    puuid = data.get("puuid")
+    if not puuid:
+        raise RiotNotFound(404, "PUUID introuvable pour ce Riot ID.")
+    return puuid
+
+
+async def fetch_lol_rank_by_puuid(
+    riot_key: str, region_code: str, puuid: str
+) -> Optional[Tuple[str, Optional[str], int, float]]:
+    """League-v4 by-puuid : renvoie le rang RANKED_SOLO_5x5, ou None si non classé cette saison."""
+    platform = PLATFORM_MAP.get((region_code or "").upper())
+    if not platform:
+        raise ValueError(f"Région inconnue : {region_code}")
+    headers = {"X-Riot-Token": riot_key}
+    url = f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
+    async with aiohttp.ClientSession() as session:
+        entries = await _get_json(session, url, headers)
+    chosen = next((e for e in entries if e.get("queueType") == "RANKED_SOLO_5x5"), None)
+    if not chosen:
+        return None
     tier = (chosen.get("tier") or "").upper()
     division = chosen.get("rank")
     lp = int(chosen.get("leaguePoints", 0))
     rating = rank_to_rating(tier, division, lp)
     return tier, division, lp, rating
+
+
+async def fetch_lol_rank_info(
+    riot_key: Optional[str], region_code: str, game_name: str, tag_line: str
+) -> Optional[Tuple[str, Optional[str], int, float, str]]:
+    """
+    Riot ID complet -> (tier, division, lp, rating, puuid).
+    Lève RiotApiError (RiotKeyInvalid/RiotNotFound/RiotRateLimited) en cas d'échec Riot ;
+    renvoie None uniquement si le compte n'a pas de rang en solo/duo.
+    """
+    if not riot_key:
+        return None
+    puuid = await fetch_puuid_by_riot_id(riot_key, region_code, game_name, tag_line)
+    rank = await fetch_lol_rank_by_puuid(riot_key, region_code, puuid)
+    if rank is None:
+        return None
+    tier, division, lp, rating = rank
+    return tier, division, lp, rating, puuid

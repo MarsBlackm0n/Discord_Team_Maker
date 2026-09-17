@@ -53,8 +53,11 @@ Supprime les salons vocaux temporaires vides ; les salons occupés sont conserv�
 
 ---
 
-### `/ranks`, `/setskill`, `/setrank`, `/linklol`
-Gestion des **ratings** manuels ou importés via Riot.
+### `/ranks`, `/setskill`, `/setrank`, `/linklol`, `/syncrank`
+Gestion des **ratings** manuels ou importés via Riot. `/linklol riot_id:Pseudo#TAG region:EUW` lie un
+**Riot ID complet** et importe le rang SoloQ si `RIOT_API_KEY` est configurée ; `/syncrank` rafraîchit ensuite
+ce rang sans ressaisir le Riot ID (utile juste avant un roll). `/team` et `/teamroll` rafraîchissent aussi
+automatiquement un rang Riot vieux de plus de 30 min.
 
 ---
 

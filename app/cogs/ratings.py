@@ -3,8 +3,11 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
-from ..db import set_rating, fetch_all_ratings_and_links, link_lol, set_lol_rank
-from ..riot import PLATFORM_MAP, fetch_lol_rank_info, rank_to_rating
+from ..db import set_rating, fetch_all_ratings_and_links, link_lol, set_lol_rank, get_linked_lol
+from ..riot import (
+    PLATFORM_MAP, fetch_lol_rank_info, fetch_lol_rank_by_puuid, rank_to_rating,
+    parse_riot_id, RiotKeyInvalid, RiotNotFound, RiotRateLimited, RiotApiError,
+)
 
 class RatingsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -101,32 +104,93 @@ class RatingsCog(commands.Cog):
         embed.set_footer(text=" • ".join([f"{len(filtered)}/{total} affichés", f"Tri: {sort_val.replace('_',' ')}", f"Portée: {'vocal' if use_vocal else 'serveur'}"]))
         await inter.followup.send(embed=embed, ephemeral=False)
 
-    @app_commands.command(name="linklol", description="Lier un compte LoL + import du rang si clé Riot.")
-    @app_commands.describe(user="Membre", summoner="Pseudo LoL exact", region="EUW/EUNE/NA/KR/BR/JP/LAN/LAS/OCE/TR/RU")
-    async def linklol(self, inter: discord.Interaction, user: discord.Member, summoner: str, region: str):
-        from ..db import link_lol  # éviter cycle import
+    @app_commands.command(name="linklol", description="Lier un compte LoL (Riot ID) + import du rang si clé Riot.")
+    @app_commands.describe(user="Membre", riot_id="Riot ID complet, ex: Pseudo#EUW", region="EUW/EUNE/NA/KR/BR/JP/LAN/LAS/OCE/TR/RU")
+    async def linklol(self, inter: discord.Interaction, user: discord.Member, riot_id: str, region: str):
         await inter.response.defer(ephemeral=False, thinking=True)
         code = PLATFORM_MAP.get(region.upper())
         if not code:
             await inter.followup.send("❌ Région invalide.")
             return
-
-        await link_lol(self.bot.settings.DB_PATH, user.id, summoner, code)
+        try:
+            game_name, tag_line = parse_riot_id(riot_id)
+        except ValueError as exc:
+            await inter.followup.send(f"❌ {exc}")
+            return
 
         if not self.bot.settings.RIOT_API_KEY:
+            await link_lol(self.bot.settings.DB_PATH, user.id, game_name, tag_line, code)
             await inter.followup.send("ℹ️ Lien enregistré. Pas de clé Riot configurée → utilise `/setrank` ou `/setskill`.")
             return
 
-        info = await fetch_lol_rank_info(self.bot.settings.RIOT_API_KEY, code, summoner)
-        if not info:
-            await inter.followup.send("⚠️ Impossible de récupérer le rang maintenant (clé expirée/pseudo/pas de ranked).")
+        try:
+            info = await fetch_lol_rank_info(self.bot.settings.RIOT_API_KEY, code, game_name, tag_line)
+        except RiotKeyInvalid:
+            await inter.followup.send("⛔ Clé Riot invalide ou expirée côté bot. Préviens l'admin (variable `RIOT_API_KEY` sur Railway).")
+            return
+        except RiotNotFound:
+            await inter.followup.send(f"❌ Riot ID **{riot_id}** introuvable sur la région **{region}**. Vérifie l'orthographe et le tag.")
+            return
+        except RiotRateLimited as exc:
+            await inter.followup.send(f"⏳ Riot API rate limitée, réessaie dans ~{int(exc.retry_after)}s.")
+            return
+        except RiotApiError as exc:
+            await inter.followup.send(f"⚠️ Erreur Riot API ({exc.status}), réessaie plus tard.")
             return
 
-        tier, division, lp, rating = info
+        if info is None:
+            await link_lol(self.bot.settings.DB_PATH, user.id, game_name, tag_line, code)
+            await inter.followup.send(f"✅ Lien enregistré pour **{riot_id}** ({region}). Pas de partie classée solo/duo trouvée cette saison.")
+            return
+
+        tier, division, lp, rating, puuid = info
+        await link_lol(self.bot.settings.DB_PATH, user.id, game_name, tag_line, code, puuid)
         await set_rating(self.bot.settings.DB_PATH, user.id, rating)
         await set_lol_rank(self.bot.settings.DB_PATH, user.id, source="riot", tier=tier, division=division, lp=lp)
         div_txt = f" {division}" if division else ""
-        await inter.followup.send(f"✅ **{user.display_name}** lié à **{summoner}** ({region}) → **{int(rating)}** • _{tier.title()}{div_txt} {lp} LP_.", ephemeral=True)
+        await inter.followup.send(f"✅ **{user.display_name}** lié à **{riot_id}** ({region}) → **{int(rating)}** • _{tier.title()}{div_txt} {lp} LP_.", ephemeral=True)
+
+    @app_commands.command(name="syncrank", description="Re-synchroniser ton rang LoL (ou celui d'un autre) depuis Riot, sans ressaisir ton Riot ID.")
+    @app_commands.describe(user="Autre joueur (Gérer le serveur requis)")
+    async def syncrank(self, inter: discord.Interaction, user: Optional[discord.Member] = None):
+        target = user or inter.user
+        if target.id != inter.user.id and not inter.user.guild_permissions.manage_guild:
+            await inter.response.send_message("⛔ Gérer le serveur est requis pour resynchroniser un autre joueur.", ephemeral=True)
+            return
+        if not self.bot.settings.RIOT_API_KEY:
+            await inter.response.send_message("❌ Pas de clé Riot configurée sur le bot.", ephemeral=True)
+            return
+        link = await get_linked_lol(self.bot.settings.DB_PATH, target.id)
+        if not link:
+            await inter.response.send_message(f"❌ {target.display_name} n'a pas de compte lié. Utilise `/linklol` d'abord.", ephemeral=True)
+            return
+        game_name, region, tag_line, puuid = link
+        if not puuid:
+            await inter.response.send_message("❌ Lien incomplet (ancien format). Relance `/linklol` pour ce joueur.", ephemeral=True)
+            return
+
+        await inter.response.defer(ephemeral=True, thinking=True)
+        try:
+            rank = await fetch_lol_rank_by_puuid(self.bot.settings.RIOT_API_KEY, region, puuid)
+        except RiotKeyInvalid:
+            await inter.followup.send("⛔ Clé Riot invalide ou expirée côté bot. Préviens l'admin.", ephemeral=True)
+            return
+        except RiotRateLimited as exc:
+            await inter.followup.send(f"⏳ Riot API rate limitée, réessaie dans ~{int(exc.retry_after)}s.", ephemeral=True)
+            return
+        except RiotApiError as exc:
+            await inter.followup.send(f"⚠️ Erreur Riot API ({exc.status}), réessaie plus tard.", ephemeral=True)
+            return
+
+        if rank is None:
+            await inter.followup.send(f"ℹ️ {target.display_name} : pas de partie classée solo/duo trouvée cette saison.", ephemeral=True)
+            return
+
+        tier, division, lp, rating = rank
+        await set_rating(self.bot.settings.DB_PATH, target.id, rating)
+        await set_lol_rank(self.bot.settings.DB_PATH, target.id, source="riot", tier=tier, division=division, lp=lp)
+        div_txt = f" {division}" if division else ""
+        await inter.followup.send(f"✅ **{target.display_name}** → **{int(rating)}** • _{tier.title()}{div_txt} {lp} LP_.", ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(RatingsCog(bot))

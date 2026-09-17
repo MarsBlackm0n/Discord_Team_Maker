@@ -1,5 +1,6 @@
 # app/cogs/team.py
 from typing import List, Dict, Tuple, Optional, Literal
+import asyncio
 import itertools
 import time
 from datetime import datetime
@@ -17,9 +18,13 @@ from ..db import (
 
 # Import gracieux : si le helper Riot n'existe pas encore, on ne plante pas
 try:
-    from ..riot import fetch_lol_rank_info  # doit retourner (tier, division, lp, rating_float)
+    from ..riot import fetch_lol_rank_by_puuid, RiotApiError
 except Exception:
-    fetch_lol_rank_info = None  # type: ignore
+    fetch_lol_rank_by_puuid = None  # type: ignore
+    RiotApiError = Exception  # type: ignore
+
+# Ne pas re-fetch un rang Riot importé il y a moins de ce délai (évite de spammer l'API à chaque roll).
+RIOT_RESYNC_TTL_SECONDS = 30 * 60
 
 from ..team_logic import (
     parse_mentions, parse_sizes, group_by_with_constraints,
@@ -122,34 +127,46 @@ class TeamCog(commands.Cog):
             if r is not None:
                 ratings[m.id] = r
 
-        # 2) Riot si demandé et possible + si lien est connu
-        if auto_import_riot and self.bot.settings.RIOT_API_KEY and fetch_lol_rank_info:
-            from ..db import get_linked_lol, set_lol_rank
+        # 2) Riot si demandé et possible : comble les rangs manquants et rafraîchit
+        #    les rangs Riot devenus périmés (> RIOT_RESYNC_TTL_SECONDS). Toute erreur
+        #    Riot (clé expirée, rate limit, réseau) est avalée : on ne bloque jamais
+        #    un roll d'équipe pour un souci d'API, on garde la valeur en cache.
+        if auto_import_riot and self.bot.settings.RIOT_API_KEY and fetch_lol_rank_by_puuid:
+            from ..db import get_linked_lol, set_lol_rank, get_lol_rank_meta
+            now = time.time()
             for m in members:
-                if m.id in ratings:
-                    continue
                 link = await get_linked_lol(self.bot.settings.DB_PATH, m.id)
                 if not link:
                     continue
-                summoner, region_code = link
-                info = await fetch_lol_rank_info(
-                    self.bot.settings.RIOT_API_KEY,
-                    region_code,
-                    summoner
+                _game_name, region_code, _tag_line, puuid = link
+                if not puuid:
+                    continue  # lien créé avant l'introduction du Riot ID : relancer /linklol
+
+                if m.id in ratings:
+                    meta = await get_lol_rank_meta(self.bot.settings.DB_PATH, m.id)
+                    is_stale_riot = bool(meta) and meta["source"] == "riot" and (now - meta["updated_at"]) > RIOT_RESYNC_TTL_SECONDS
+                    if not is_stale_riot:
+                        continue
+
+                try:
+                    rank = await fetch_lol_rank_by_puuid(self.bot.settings.RIOT_API_KEY, region_code, puuid)
+                except RiotApiError:
+                    continue
+                await asyncio.sleep(0.1)  # lisse les rafales sur le quota Riot
+                if not rank:
+                    continue
+                tier, division, lp, rr = rank
+                ratings[m.id] = rr
+                await set_rating(self.bot.settings.DB_PATH, m.id, rr)
+                await set_lol_rank(
+                    self.bot.settings.DB_PATH,
+                    m.id,
+                    source="riot",
+                    tier=tier,
+                    division=division,
+                    lp=lp,
                 )
-                if info:
-                    tier, division, lp, rr = info
-                    ratings[m.id] = rr
-                    await set_rating(self.bot.settings.DB_PATH, m.id, rr)
-                    await set_lol_rank(
-                        self.bot.settings.DB_PATH,
-                        m.id,
-                        source="riot",
-                        tier=tier,
-                        division=division,
-                        lp=lp,
-                    )
-                    imported.append(m)
+                imported.append(m)
 
         # 3) défaut 1000
         for m in members:

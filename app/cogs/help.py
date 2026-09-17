@@ -179,9 +179,18 @@ HELP_SECTIONS = {
         {
             "name": "/linklol",
             "desc": (
-                "Lie un pseudo LoL et (si une **RIOT_API_KEY** est configurée) importe le rang **SoloQ** pour calculer le rating. "
+                "Lie un **Riot ID** complet (`Pseudo#TAG`) et (si une **RIOT_API_KEY** est configurée) importe le rang **SoloQ** pour calculer le rating. "
                 "Régions : `EUW, EUNE, NA, KR, BR, JP, LAN, LAS, OCE, TR, RU`."
             ),
+            "examples": ["/linklol user:@Alice riot_id:Alice#EUW region:EUW"],
+        },
+        {
+            "name": "/syncrank",
+            "desc": (
+                "Rafraîchit le rang **SoloQ** d'un compte déjà lié via `/linklol`, sans ressaisir le Riot ID. "
+                "Utile juste avant un roll pour repartir sur des rangs à jour."
+            ),
+            "examples": ["/syncrank", "/syncrank user:@Alice"],
         },
         {
             "name": "/ranks",
@@ -203,8 +212,23 @@ HELP_SECTIONS = {
     ],
 }
 
+SETUP_MINIMAL_TEXT = (
+    "**Admin (une seule fois)** : *(optionnel)* configurer `RIOT_API_KEY` sur Railway pour activer l'import "
+    "automatique des rangs. Sans clé, tout fonctionne en mode 100% manuel (`/setrank`, `/setskill`).\n\n"
+    "**Chaque joueur (une seule fois)** :\n"
+    "• `/linklol riot_id:Pseudo#TAG region:EUW` → lie le compte et importe le rang SoloQ (si clé Riot configurée)\n"
+    "• ou, sans clé Riot : `/setrank tier:... division:... lp:...`\n"
+    "• `/setroles first_role:... second_role:...` → préférences de lane, utilisées par le mode `balanced`\n\n"
+    "**Avant chaque roll** : rien à refaire — `/team`/`/teamroll` rafraîchissent automatiquement un rang Riot "
+    "vieux de plus de 30 min. `/syncrank` force un refresh immédiat juste avant de lancer."
+)
+
 # Aide ciblée par commande (texte concis + exemples)
 COMMAND_DETAILS = {
+    "setup": {
+        "title": "✅ Setup minimal",
+        "desc": SETUP_MINIMAL_TEXT,
+    },
     # Teams
     "team": {
         "title": "ℹ️ /team",
@@ -296,7 +320,8 @@ COMMAND_DETAILS = {
     # Ratings / LoL
     "setskill": {"title": "ℹ️ /setskill", "desc": "Fixe un **rating** manuel."},
     "setrank": {"title": "ℹ️ /setrank", "desc": "Définit un **rang LoL** (offline) pour calculer le rating."},
-    "linklol": {"title": "ℹ️ /linklol", "desc": "Lie un pseudo LoL et importe le rang (si **RIOT_API_KEY**)."},
+    "linklol": {"title": "ℹ️ /linklol", "desc": "Lie un Riot ID (Pseudo#TAG) et importe le rang (si **RIOT_API_KEY**)."},
+    "syncrank": {"title": "ℹ️ /syncrank", "desc": "Rafraîchit le rang SoloQ d'un compte déjà lié, sans ressaisir le Riot ID."},
     "ranks": {"title": "ℹ️ /ranks", "desc": "Affiche les **ratings** et rangs connus."},
 
     # Admin
@@ -338,6 +363,7 @@ class HelpCog(commands.Cog):
                 "5️⃣ `/disbandteams` — nettoie les salons après la session\n\n"
                 "💾 La **dernière config** d’équipes est mémorisée (utilisée par `/move`, `/teamroll`, `/tournament`, `/arena`)."
             )
+            embed.add_field(name="✅ Setup minimal avant un roll", value=SETUP_MINIMAL_TEXT, inline=False)
             # Résumé court par catégories
             embed.add_field(
                 name="👥 Équipes",
@@ -361,7 +387,7 @@ class HelpCog(commands.Cog):
             )
             embed.add_field(
                 name="📊 Ratings & LoL",
-                value="`/ranks`  `/setskill`  `/setrank`  `/linklol`",
+                value="`/ranks`  `/setskill`  `/setrank`  `/linklol`  `/syncrank`",
                 inline=False
             )
             embed.add_field(
@@ -369,7 +395,7 @@ class HelpCog(commands.Cog):
                 value="`/whoami`  `/resync`  `/resyncglobal`  `/backupdb`  `/exportcsv`  `/restart`  `/shutdown`",
                 inline=False
             )
-            embed.set_footer(text="Astuce: `/help command:arena report` pour l’aide d’une sous-commande.")
+            embed.set_footer(text="Astuce: `/help command:setup` pour le détail du setup, `/help command:arena report` pour une sous-commande.")
             await inter.response.send_message(embed=embed, ephemeral=True)
             return
 
