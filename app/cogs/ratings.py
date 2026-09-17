@@ -240,7 +240,7 @@ class RatingsCog(commands.Cog):
 
     @app_commands.command(
         name="syncroles",
-        description="Suggérer les rôles des joueurs du vocal à partir de leurs dernières games ranked (à valider, n'écrase rien seul)."
+        description="Suggère les rôles des joueurs du vocal via leurs dernières games ranked (à valider par bouton)."
     )
     @app_commands.describe(matches="Nombre de dernières games SoloQ analysées par joueur (5 à 10, défaut 8)")
     async def syncroles(self, inter: discord.Interaction, matches: Optional[int] = 8):
