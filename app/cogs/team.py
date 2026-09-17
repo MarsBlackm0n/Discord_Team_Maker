@@ -23,8 +23,10 @@ except Exception:
     fetch_lol_rank_by_puuid = None  # type: ignore
     RiotApiError = Exception  # type: ignore
 
-# Ne pas re-fetch un rang Riot importé il y a moins de ce délai (évite de spammer l'API à chaque roll).
-RIOT_RESYNC_TTL_SECONDS = 30 * 60
+# Ne pas re-fetch un rang Riot importé il y a moins de ce délai (évite de spammer l'API à chaque roll :
+# un rang ne change qu'après une game jouée, pas besoin de re-vérifier à chaque /team de la soirée).
+# Utiliser /syncrank pour forcer un refresh immédiat avant un roll précis.
+RIOT_RESYNC_TTL_SECONDS = 24 * 60 * 60
 
 from ..team_logic import (
     parse_mentions, parse_sizes, group_by_with_constraints,

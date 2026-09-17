@@ -1,6 +1,7 @@
 # app/riot.py
 from __future__ import annotations
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List
+import asyncio
 import aiohttp
 
 PLATFORM_MAP = {
@@ -130,3 +131,56 @@ async def fetch_lol_rank_info(
         return None
     tier, division, lp, rating = rank
     return tier, division, lp, rating, puuid
+
+
+# ---- Inférence des rôles préférés à partir de l'historique de matchs ----
+
+RANKED_SOLO_QUEUE_ID = 420
+
+# teamPosition (Match-v5) -> code de rôle interne (voir app/lanes.py: ROLES).
+POSITION_TO_ROLE = {
+    "TOP": "top", "JUNGLE": "jgl", "MIDDLE": "mid", "BOTTOM": "bot", "UTILITY": "sup",
+}
+_ROLE_ORDER = ("top", "jgl", "mid", "bot", "sup")
+
+# Pause entre deux appels match-v5 pour ne pas dépasser le rate limit applicatif
+# d'une clé perso (~20 req/s), qui s'applique en plus des limites par méthode affichées
+# sur le Developer Portal.
+_MATCH_FETCH_DELAY = 0.07
+
+
+async def fetch_recent_role_counts(
+    riot_key: str, region_code: str, puuid: str, count: int = 8
+) -> Dict[str, int]:
+    """
+    Analyse les `count` dernières games RANKED_SOLO_5x5 du joueur (Match-v5) et renvoie
+    {role: nombre_de_parties}. `count` doit rester bas (8-10) : chaque partie coûte un
+    appel API en plus de celui qui liste les IDs, et une clé perso est limitée à
+    ~100 requêtes/2min tous endpoints confondus.
+    """
+    continent = REGION_TO_CONTINENT.get((region_code or "").upper())
+    if not continent:
+        raise ValueError(f"Région inconnue : {region_code}")
+    headers = {"X-Riot-Token": riot_key}
+    base = f"https://{continent}.api.riotgames.com"
+    ids_url = f"{base}/lol/match/v5/matches/by-puuid/{puuid}/ids?queue={RANKED_SOLO_QUEUE_ID}&count={int(count)}"
+
+    counts: Dict[str, int] = {}
+    async with aiohttp.ClientSession() as session:
+        match_ids: List[str] = await _get_json(session, ids_url, headers)
+        for match_id in match_ids:
+            detail = await _get_json(session, f"{base}/lol/match/v5/matches/{match_id}", headers)
+            await asyncio.sleep(_MATCH_FETCH_DELAY)
+            participants = (detail.get("info") or {}).get("participants") or []
+            me = next((p for p in participants if p.get("puuid") == puuid), None)
+            if not me:
+                continue
+            role = POSITION_TO_ROLE.get((me.get("teamPosition") or "").upper())
+            if role:
+                counts[role] = counts.get(role, 0) + 1
+    return counts
+
+
+def rank_roles_by_frequency(counts: Dict[str, int]) -> List[str]:
+    """{role: count} -> liste de rôles triée du plus au moins joué (ties: ordre top/jgl/mid/bot/sup)."""
+    return [r for r, _ in sorted(counts.items(), key=lambda kv: (-kv[1], _ROLE_ORDER.index(kv[0])))]
