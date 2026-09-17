@@ -154,8 +154,8 @@ class RatingsCog(commands.Cog):
     @app_commands.describe(user="Membre", riot_id="Riot ID complet, ex: Pseudo#EUW", region="EUW/EUNE/NA/KR/BR/JP/LAN/LAS/OCE/TR/RU")
     async def linklol(self, inter: discord.Interaction, user: discord.Member, riot_id: str, region: str):
         await inter.response.defer(ephemeral=False, thinking=True)
-        code = PLATFORM_MAP.get(region.upper())
-        if not code:
+        region_code = region.upper()
+        if region_code not in PLATFORM_MAP:
             await inter.followup.send("❌ Région invalide.")
             return
         try:
@@ -165,12 +165,12 @@ class RatingsCog(commands.Cog):
             return
 
         if not self.bot.settings.RIOT_API_KEY:
-            await link_lol(self.bot.settings.DB_PATH, user.id, game_name, tag_line, code)
+            await link_lol(self.bot.settings.DB_PATH, user.id, game_name, tag_line, region_code)
             await inter.followup.send("ℹ️ Lien enregistré. Pas de clé Riot configurée → utilise `/setrank` ou `/setskill`.")
             return
 
         try:
-            info = await fetch_lol_rank_info(self.bot.settings.RIOT_API_KEY, code, game_name, tag_line)
+            info = await fetch_lol_rank_info(self.bot.settings.RIOT_API_KEY, region_code, game_name, tag_line)
         except RiotKeyInvalid:
             await inter.followup.send("⛔ Clé Riot invalide ou expirée côté bot. Préviens l'admin (variable `RIOT_API_KEY` sur Railway).")
             return
@@ -185,12 +185,12 @@ class RatingsCog(commands.Cog):
             return
 
         if info is None:
-            await link_lol(self.bot.settings.DB_PATH, user.id, game_name, tag_line, code)
+            await link_lol(self.bot.settings.DB_PATH, user.id, game_name, tag_line, region_code)
             await inter.followup.send(f"✅ Lien enregistré pour **{riot_id}** ({region}). Pas de partie classée solo/duo trouvée cette saison.")
             return
 
         tier, division, lp, rating, puuid = info
-        await link_lol(self.bot.settings.DB_PATH, user.id, game_name, tag_line, code, puuid)
+        await link_lol(self.bot.settings.DB_PATH, user.id, game_name, tag_line, region_code, puuid)
         await set_rating(self.bot.settings.DB_PATH, user.id, rating)
         await set_lol_rank(self.bot.settings.DB_PATH, user.id, source="riot", tier=tier, division=division, lp=lp)
         div_txt = f" {division}" if division else ""
@@ -316,6 +316,22 @@ class RatingsCog(commands.Cog):
 
         view = RoleSuggestionView(self.bot.settings.DB_PATH, guild.id, suggestions, display_names)
         await inter.followup.send(embed=embed, view=view)
+
+    async def cog_app_command_error(self, inter: discord.Interaction, error: app_commands.AppCommandError):
+        """Filet de sécurité : toute exception non prévue (bug DB, etc.) doit quand même
+        répondre à l'interaction, sinon Discord la laisse bloquée sur "réfléchit..."
+        jusqu'à expiration du token (~15 min) au lieu d'un message d'erreur immédiat."""
+        import traceback
+        traceback.print_exception(type(error), error, error.__traceback__)
+        message = "⚠️ Erreur inattendue côté bot, réessaie plus tard (voir logs Railway)."
+        try:
+            if inter.response.is_done():
+                await inter.followup.send(message, ephemeral=True)
+            else:
+                await inter.response.send_message(message, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(RatingsCog(bot))
